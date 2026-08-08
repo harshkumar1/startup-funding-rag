@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Brute Force — Comparing the Query to Every Chunk</title>
+<!--
+  ============================================================================
+  CONTEXT FOR FUTURE EDITS (read this before changing anything)
+  ============================================================================
+  PURPOSE
+  Third and simplest companion piece to hnsw_demo.html (graph-based index)
+  and ivf_demo.html (clustering-based index), for the same presenter/
+  audience. This one shows the baseline every other index is compared
+  against: FLAT / brute-force search — no structure at all, just compare
+  the query to literally every stored chunk and pick whichever is closest.
+
+  DATA MODEL / LAYOUT — changed from the earlier version of this file
+  - Earlier version reused the scattered (x,y) positions from hnsw_demo.html
+    / ivf_demo.html (3 loose visual clusters). That was REPLACED per
+    explicit request: chunks are now laid out as a single vertical column
+    on the left (like a table), with the query fixed on the right. This is
+    intentional and specific to THIS demo — it does not need to match the
+    other two files' layout, since brute force has no clusters/graph to
+    visually justify scattered positions in the first place.
+  - IMPORTANT: because chunks are now in a fixed column ORDER rather than
+    real spatial (x,y) positions relative to the query, the on-screen
+    distance from a row to the query is NOT visually proportional to the
+    real distance value. A row near the top and a row near the bottom are
+    just "some row in a list," not positioned by actual proximity. The
+    NUMBER labeled on each line is the real, accurate Euclidean distance;
+    the line's length/angle on screen is purely schematic. Don't be
+    tempted to reposition rows to visually reflect distance — the whole
+    point of the redesign was a clean, readable list, not a spatial map.
+  - queryOrig is still (610, 345) — the SAME conceptual query embedding
+    used in hnsw_demo.html — but since chunk nodes no longer sit at their
+    original (x,y) coordinates on screen, distances are computed against
+    each chunk's ORIGINAL position (kept in `nodes[].origX/origY`), NOT
+    against the new column layout position (`dispX/dispY`, display only).
+    See `dist()` which explicitly uses origX/origY, never dispX/dispY. Do
+    not accidentally compute distance using the display coordinates — that
+    would silently produce meaningless numbers that don't match the other
+    two demos.
+
+  NO DISTANCE PANEL — removed per explicit request
+  Earlier versions of this file (and both hnsw_demo.html / ivf_demo.html)
+  showed a text-based "distance comparison" panel below the graph, listing
+  each comparison as a row with a number. That panel is REMOVED in this
+  version — all distance information is now shown directly on the graph
+  itself: a line drawn from the query to each chunk's row, labeled with
+  that chunk's real distance value. Do not re-add the text panel unless
+  explicitly asked; the graph-with-labeled-lines IS the distance display
+  now, not a supplement to a separate panel.
+
+  LINE / SELECTION VISUAL DESIGN
+  - The moment a query starts (startQuery()), a thin gray unlabeled line is
+    drawn from the query to EVERY currently-inserted chunk's row, all at
+    once — this previews the full comparison set before any actual
+    distance has been computed, matching the request that all rows get
+    connected simultaneously rather than one at a time.
+  - As each chunk is actually compared (compareNextChunk()), that specific
+    line gets a distance label at its midpoint and changes color: amber if
+    compared but not currently the best, green if it's the running
+    nearest-so-far. Only ONE line/row is ever green at a time — the single
+    global minimum recomputed fresh after every comparison, same rule used
+    in hnsw_demo.html / ivf_demo.html.
+  - At the end of the scan, the winning line gets an additional visual
+    marker: a rounded oval (SVG ellipse) drawn around its distance label,
+    to explicitly flag it as the selected/final answer — this was a
+    specific request ("mark it with a round oval to indicate selection")
+    rather than relying on color alone.
+
+  IF YOU ARE ASKED TO CHANGE THIS FILE
+  - Do not add clusters, centroids, or a graph "for consistency" with the
+    other two demos — the absence of any index structure is this demo's
+    entire teaching point.
+  - If asked to change the query point, remember: there is no scenario to
+    verify or protect here (unlike ivf_demo.html) — any query point works
+    correctly by definition, since brute force checks every chunk. Just
+    update queryOrig if you introduce a different point — no simulation/
+    verification needed, unlike ivf_demo.html's carefully-tuned point.
+  ============================================================================
+-->
+<style>
+  :root {
+    --bg: #ffffff;
+    --panel: #f8fafc;
+    --node: #cbd5e1;
+    --node-current: #ef4444;
+    --node-final: #22c55e;
+    --node-scanned: #f59e0b;
+    --text: #1e293b;
+    --muted: #64748b;
+    --accent: #0284c7;
+    --border: #e2e8f0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px 0; }
+  p.subtitle { color: var(--muted); margin: 0 0 20px 0; font-size: 14px; }
+  .layout { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+  .stage {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px;
+    flex: 1;
+    min-width: 640px;
+  }
+  .band-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+  .controls {
+    width: 300px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+  }
+  .controls h2 { font-size: 14px; margin: 0 0 10px 0; color: var(--accent); }
+  button {
+    display: block;
+    width: 100%;
+    margin-bottom: 8px;
+    padding: 10px 12px;
+    border: none;
+    border-radius: 8px;
+    background: #1d4ed8;
+    color: white;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  button:hover:not(:disabled) { background: #2563eb; }
+  button:disabled { background: #e2e8f0; color: #94a3b8; cursor: not-allowed; }
+  button.secondary { background: #e2e8f0; color: #1e293b; }
+  button.secondary:hover:not(:disabled) { background: #cbd5e1; }
+  .log {
+    margin-top: 14px;
+    background: #f1f5f9;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+    font-size: 12.5px;
+    line-height: 1.5;
+    max-height: 320px;
+    overflow-y: auto;
+    color: #334155;
+  }
+  .log div { margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid #e2e8f0; }
+  .log div:last-child { border-bottom: none; }
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 12px;
+    font-size: 11.5px;
+    color: var(--muted);
+  }
+  .legend span { display: flex; align-items: center; gap: 5px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  svg text { font-size: 12px; fill: var(--text); font-family: inherit; }
+  .step-caption {
+    font-size: 13px;
+    color: var(--accent);
+    margin-top: 10px;
+    min-height: 34px;
+  }
+</style>
+</head>
+<body>
+
+<h1>Brute Force — Comparing the Query to Every Chunk</h1>
+<p class="subtitle">Left: chunks listed in a single column — no structure, no computation at insert time. Right: the query. Each comparison draws a labeled line; the smallest distance wins at the end.</p>
+
+<div class="layout">
+  <div class="stage">
+    <svg id="svg" width="100%" height="520" viewBox="0 0 900 520"></svg>
+    <div class="legend">
+      <span><i class="dot" style="background:var(--node)"></i> stored chunk</span>
+      <span><i class="dot" style="background:var(--node-current)"></i> query</span>
+      <span><i class="dot" style="background:var(--node-scanned)"></i> compared</span>
+      <span><i class="dot" style="background:var(--node-final)"></i> final answer (true nearest)</span>
+    </div>
+  </div>
+
+  <div class="controls">
+    <h2>1. Run a query</h2>
+    <button id="startQuery">Start comparing</button>
+    <button id="queryStep" disabled>Compare next chunk</button>
+    <button id="queryAll" disabled class="secondary">Compare all remaining</button>
+    <button id="resetAll" class="secondary">Reset everything</button>
+
+    <div class="step-caption" id="caption">All 14 chunks are already stored. Click "Start comparing" to begin.</div>
+
+    <div class="log" id="log"></div>
+  </div>
+</div>
+
+<script>
+// ---- Original (x,y) positions, kept ONLY as the source of truth for real
+// distance calculations — NOT used for on-screen layout anymore (see
+// top-of-file comment). These are copied verbatim from hnsw_demo.html /
+// ivf_demo.html so distance numbers stay identical/comparable across demos.
+const nodes = [
+  {id:'A', origX:80,  origY:310},
+  {id:'B', origX:140, origY:350},
+  {id:'C', origX:110, origY:390},
+  {id:'D', origX:170, origY:310},
+  {id:'E', origX:400, origY:300},
+  {id:'F', origX:450, origY:340},
+  {id:'G', origX:420, origY:390},
+  {id:'H', origX:480, origY:310},
+  {id:'I', origX:520, origY:360},
+  {id:'J', origX:700, origY:310},
+  {id:'K', origX:750, origY:350},
+  {id:'L', origX:720, origY:400},
+  {id:'M', origX:780, origY:310},
+  {id:'N', origX:660, origY:360},
+];
+
+// ---- Display-only layout: single column on the left, one row per chunk ----
+const COLUMN_X = 110;
+const ROW_START_Y = 50;
+const ROW_SPACING = 32;
+nodes.forEach((n, i) => {
+  n.dispX = COLUMN_X;
+  n.dispY = ROW_START_Y + i * ROW_SPACING;
+});
+
+// Query sits on the right, vertically centered against the column of rows.
+const queryDisp = { x: 780, y: ROW_START_Y + ((nodes.length-1) * ROW_SPACING) / 2 };
+// SAME conceptual query embedding as hnsw_demo.html's queryPos (610, 345) —
+// kept here purely as the value used for distance math (against each
+// node's origX/origY), separate from where the query dot is drawn on screen.
+const queryOrig = {x: 610, y: 345};
+
+// insertedCount starts at nodes.length — the demo now opens directly in the
+// "all chunks already stored" state (per explicit request: the separate
+// "1. Store the chunks" build phase / buttons were removed). There is no
+// insert/build step left in this file at all; if a future session is asked
+// to bring a build phase back, see hnsw_demo.html / ivf_demo.html for the
+// "Insert next chunk" pattern to reintroduce.
+let insertedCount = nodes.length;
+let queryActive = false;
+let finalNode = null;
+
+function dist(node){
+  // ALWAYS computed against original positions, never display positions —
+  // see top-of-file comment for why this distinction matters here.
+  return Math.hypot(node.origX - queryOrig.x, node.origY - queryOrig.y);
+}
+function fmt(d){ return d.toFixed(1); }
+
+function resetAll(){
+  queryActive = false;
+  finalNode = null;
+  scanIndex = 0;
+  globalBest = null;
+  comparisons = {};
+  document.getElementById('startQuery').disabled = false;
+  document.getElementById('queryStep').disabled = true;
+  document.getElementById('queryAll').disabled = true;
+  document.getElementById('log').innerHTML = '';
+  document.getElementById('caption').textContent = 'All 14 chunks are already stored. Click "Start comparing" to begin.';
+  render();
+}
+
+// ----------------------------------------------------------------------------
+// Comparison state — one entry per node once it's been compared.
+// comparisons[nodeId] = { value } ; presence in this map = "line is labeled/
+// colored," absence = "line still plain gray (not yet compared)."
+// ----------------------------------------------------------------------------
+let scanIndex = 0;
+let globalBest = null; // {nodeId, value}
+let comparisons = {};
+
+function startQuery(){
+  queryActive = true;
+  finalNode = null;
+  scanIndex = 0;
+  globalBest = null;
+  comparisons = {};
+  document.getElementById('startQuery').disabled = true;
+  document.getElementById('queryStep').disabled = false;
+  document.getElementById('queryAll').disabled = false;
+
+  const msg = `Query is ready. Lines are drawn to all ${insertedCount} stored chunks up front — comparing them one at a time will label each line with its real distance.`;
+  log(msg);
+  document.getElementById('caption').innerHTML = msg;
+  render();
+}
+
+function compareNextChunk(){
+  if (!queryActive || scanIndex >= insertedCount) return;
+  const node = nodes[scanIndex];
+  scanIndex++;
+
+  const d = dist(node);
+  comparisons[node.id] = { value: d };
+
+  if (globalBest === null || d < globalBest.value){
+    globalBest = { nodeId: node.id, value: d };
+  }
+
+  const isDone = scanIndex >= insertedCount;
+  let msg;
+  if (isDone){
+    finalNode = globalBest.nodeId;
+    document.getElementById('queryStep').disabled = true;
+    document.getElementById('queryAll').disabled = true;
+    msg = `Compared <b>${node.id}</b> (${fmt(d)}). All ${insertedCount} chunks now compared — <b>${globalBest.nodeId}</b> (${fmt(globalBest.value)}) is the true nearest chunk, guaranteed, since nothing was skipped.`;
+  } else {
+    msg = `Compared <b>${node.id}</b> (${fmt(d)}). Nearest so far: <b>${globalBest.nodeId}</b> at ${fmt(globalBest.value)}.`;
+  }
+
+  log(msg);
+  document.getElementById('caption').innerHTML = msg;
+  render();
+}
+
+function compareAllRemaining(){
+  while (queryActive && scanIndex < insertedCount) compareNextChunk();
+}
+
+function log(html){
+  const el = document.getElementById('log');
+  const div = document.createElement('div');
+  div.innerHTML = html;
+  el.prepend(div);
+}
+
+function render(){
+  const svg = document.getElementById('svg');
+  svg.innerHTML = '';
+
+  svg.innerHTML += `<rect x="0" y="10" width="900" height="500" rx="10" fill="#f8fafc"/>`;
+
+  const inserted = nodes.slice(0, insertedCount);
+
+  // Lines: drawn to EVERY inserted node the moment a query is active — all
+  // at once, per request — then individually labeled/colored as each gets
+  // actually compared.
+  if (queryActive){
+    inserted.forEach(n => {
+      const cmp = comparisons[n.id];
+      const isFinal = finalNode === n.id;
+      const isBest = globalBest && globalBest.nodeId === n.id && !isFinal;
+      let stroke = '#cbd5e1', width = 1.5;
+      if (cmp){
+        stroke = (isFinal || isBest) ? '#16a34a' : '#f59e0b';
+        width = (isFinal || isBest) ? 2.5 : 1.5;
+      }
+      svg.innerHTML += `<line x1="${queryDisp.x}" y1="${queryDisp.y}" x2="${n.dispX+16}" y2="${n.dispY}" stroke="${stroke}" stroke-width="${width}"/>`;
+
+      if (cmp){
+        const mx = (queryDisp.x + n.dispX+16) / 2;
+        const my = (queryDisp.y + n.dispY) / 2;
+        const labelColor = (isFinal || isBest) ? '#15803d' : '#92400e';
+
+        // Selected/final line gets an oval marker behind its label, per request.
+        if (isFinal){
+          svg.innerHTML += `<ellipse cx="${mx}" cy="${my}" rx="26" ry="13" fill="#dcfce7" stroke="#16a34a" stroke-width="1.5"/>`;
+        }
+        svg.innerHTML += `<text x="${mx}" y="${my+4}" fill="${labelColor}" font-weight="${isFinal?'bold':'normal'}" text-anchor="middle" style="font-size:11px;">${fmt(cmp.value)}</text>`;
+      }
+    });
+
+    // query marker
+    svg.innerHTML += `<circle cx="${queryDisp.x}" cy="${queryDisp.y}" r="9" fill="none" stroke="#f472b6" stroke-width="2.5"/>`;
+    svg.innerHTML += `<text x="${queryDisp.x-10}" y="${queryDisp.y-16}" fill="#f472b6">query</text>`;
+  }
+
+  // chunk rows
+  inserted.forEach(n=>{
+    let fill = '#cbd5e1';
+    if (finalNode === n.id) fill = '#22c55e';
+    else if (comparisons[n.id]) fill = '#f59e0b';
+    svg.innerHTML += `<circle cx="${n.dispX}" cy="${n.dispY}" r="14" fill="${fill}" stroke="#0f172a" stroke-width="2"/>`;
+    svg.innerHTML += `<text x="${n.dispX-4}" y="${n.dispY+4}" fill="#0f172a" font-weight="bold">${n.id}</text>`;
+  });
+}
+
+document.getElementById('startQuery').onclick = startQuery;
+document.getElementById('queryStep').onclick = compareNextChunk;
+document.getElementById('queryAll').onclick = compareAllRemaining;
+document.getElementById('resetAll').onclick = resetAll;
+
+render();
+</script>
+</body>
+</html>

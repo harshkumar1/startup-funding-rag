@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>IVF: Building Clusters, Then Navigating a Query</title>
+<!--
+  ============================================================================
+  CONTEXT FOR FUTURE EDITS (read this before changing anything)
+  ============================================================================
+  PURPOSE
+  Companion piece to hnsw_demo.html, built for the same presenter/audience.
+  Where the HNSW demo shows a graph-based index, this one shows a
+  clustering-based index (IVF — Inverted File). Same 14 fictional chunks
+  (A–N), same fixed positions, same fixed query point — reused deliberately
+  so distances are directly comparable across both demos and so the
+  presenter can say "same data, different index strategy."
+
+  DATA MODEL
+  - `nodes` (positions) are copied verbatim from hnsw_demo.html. `queryPos`,
+    however, is DELIBERATELY DIFFERENT from hnsw_demo.html — see the
+    recall-miss section below for why. Do not "fix" this to match the
+    other file; it was changed on purpose after computing that the
+    original shared point does not produce a genuine recall-miss for
+    IVF's cluster math (it does for HNSW's graph traversal, but that's a
+    different mechanism and not transferable).
+  - Each node still carries a `cluster` field (1, 2, or 3), but as of the
+    current version this is LEGACY/informational only — it is NOT what
+    decides cluster membership anymore. An earlier version of this file
+    hardcoded assignment directly from this field (no computation at all).
+    That was changed after the presenter asked for something closer to how
+    real k-means actually works: cluster membership is now COMPUTED at
+    insertion time (see SEED_CENTROIDS / clusterMembers / insertNext()) —
+    each chunk is compared against all 3 CURRENT centroids and assigned to
+    whichever is nearest at that moment. This is still a simplification of
+    real k-means (see the big comment above SEED_CENTROIDS for exactly
+    what's simplified and why), but it is a genuine computation now, not a
+    hardcoded lookup. The computed result has been verified to reproduce
+    the same {A,B,C,D}/{E,F,G,H,I}/{J,K,L,M,N} grouping the old hardcoded
+    field described — that's why the field was left in place rather than
+    deleted, purely as a cross-check / legacy reference.
+  - nlist = 3 (one cluster, one seed centroid, per existing group — see
+    SEED_CENTROIDS). Centroids are computed live as the mean (x,y) of all
+    currently-inserted members of each cluster (or the raw seed position,
+    before any member has joined), and visibly shift as more chunks are
+    inserted during the build phase. This mirrors the "live, honest
+    computation" principle used throughout the HNSW demo (e.g. edges there
+    are computed from real distances, not drawn by hand).
+  - nprobe is set in code only (`let nprobe = 1`), not via any on-page
+    control — the presenter asked for the 1/2/3 selector UI to be removed.
+    It still controls how many of the 3 centroids' buckets actually get
+    scanned; see the comment above that variable's declaration and the
+    (unused, kept-for-reference) `.nprobe-btn` CSS/markup for how to bring
+    a visual control back if ever asked.
+
+  THE DELIBERATE "RECALL MISS" TEACHING MOMENT — verified by computation,
+  do not break without re-verifying
+  With queryPos = (588, 368) and the fixed node layout:
+    - Centroid distances to query: Cluster 3 ≈ 135.8 (nearest), Cluster 2 ≈
+      136.9 (2nd-nearest, only ~1.1 behind), Cluster 1 ≈ 463.8 (far away).
+    - True globally-nearest CHUNK to the query, across all 14 nodes, is
+      node I (Cluster 2), distance ≈68.5.
+    - The nearest chunk WITHIN the nearest-centroid cluster (Cluster 3) is
+      node N, distance ≈72.4 — close, but NOT the true nearest overall.
+  This means: with nprobe=1, the search only scans Cluster 3's bucket,
+  returns N (≈72.4) as "nearest," and NEVER SEES I (≈68.5) — a genuine,
+  narrow recall loss (the two centroids were nearly tied, which is exactly
+  why this is a realistic, not contrived, miss). With nprobe=2, Cluster 2
+  also gets scanned, I is found, and correctly wins as the true nearest.
+  This is the live demonstration of the nprobe/recall tradeoff described in
+  the reference guide. The recall-miss callout at the end of a query run is
+  computed DYNAMICALLY (by comparing the achieved answer against the true
+  global nearest across all 14 nodes, regardless of nprobe) — it is not
+  hardcoded to any specific nprobe value, so it will keep working correctly
+  if node positions are ever tuned. IF YOU CHANGE queryPos OR NODE
+  POSITIONS: re-run the verification (compute all 3 centroid distances and
+  all 14 node distances to the new query point, by script, not by eye) to
+  confirm this scenario still holds, or the "aha" moment the presenter is
+  building toward will be lost or — worse — silently wrong on stage.
+
+  INTERACTION DESIGN — deliberately mirrors hnsw_demo.html's patterns
+  - Same "Insert next chunk" / "Insert all remaining" / "Reset build" flow
+    for the build phase.
+  - Query phase has two stages, matching HNSW's "Step 1 — Top layer" /
+    "Step 2 — Bottom layer" grouping:
+      Step 1 — Centroid comparison: query compared against all 3 centroids
+        (always all 3 — this part is cheap regardless of nprobe). Rows for
+        the nprobe-nearest centroids are highlighted green ("selected —
+        will scan"); the rest are grayed out ("excluded — not scanned").
+        NOTE: this is the one place this demo intentionally diverges from
+        HNSW's "only ever highlight a single nearest" rule — highlighting
+        the top-nprobe (not just top-1) is meaningful here because nprobe
+        is a real user-adjustable choice with real consequences, unlike
+        HNSW's fixed 3-node top layer where a "top-3" highlight would just
+        mean "everything" (see hnsw_demo.html's header comment for why
+        top-3 coloring was rejected there specifically).
+      Step 2 — Bucket scan: one "hop-line" per bucket actually scanned, in
+        nearest-centroid-first order. Each line lists that bucket's member
+        distances. Exactly like HNSW's bottom-layer behavior, only the
+        SINGLE global-nearest-so-far across ALL bucket-scan rows combined
+        is highlighted green at any time, recomputed fresh on every render
+        — never one highlight per bucket independently.
+  - "Scan next bucket" button = the equivalent of HNSW's "Next hop" button.
+  - Once all selected buckets are scanned, the running nearest becomes the
+    final answer (✓), and if it doesn't match the true global nearest
+    (computed across all 14 nodes ignoring nprobe), a recall-miss callout
+    is shown explaining what was missed and why.
+
+  THEME
+  Light/white theme, same CSS variable approach as hnsw_demo.html. Keep
+  colors defined in :root; SVG-string colors inside render() are hardcoded
+  hex for the same reason noted in hnsw_demo.html (CSS vars inside
+  innerHTML-injected SVG strings aren't reliably resolved in all browsers).
+
+  IF YOU ARE ASKED TO CHANGE THIS FILE
+  - Preserve the recall-miss scenario (see above) unless explicitly asked
+    to change queryPos/layout, and if you do change it, recompute by hand
+    which cluster is nearest/2nd-nearest and which single node is globally
+    nearest, and update this comment block to match.
+  - Preserve the Step 1 (multi-highlight, top-nprobe) vs Step 2 (single
+    global-min highlight) distinction — it's intentional, not an
+    inconsistency with the HNSW demo.
+  - nlist is currently fixed at 3 to match the 3 existing visual clusters.
+    If asked to support a different nlist, clustering assignment would
+    need to actually be computed (e.g. simple k-means over `nodes`) rather
+    than read from the hardcoded `cluster` field.
+  ============================================================================
+-->
+<style>
+  :root {
+    --bg: #ffffff;
+    --panel: #f8fafc;
+    --node: #cbd5e1;
+    --node-current: #ef4444;
+    --node-final: #22c55e;
+    --node-scanned: #f59e0b;
+    --text: #1e293b;
+    --muted: #64748b;
+    --accent: #0284c7;
+    --border: #e2e8f0;
+    --cluster1: #e0f2fe;
+    --cluster2: #dcfce7;
+    --cluster3: #fef3c7;
+    --centroid1: #0284c7;
+    --centroid2: #16a34a;
+    --centroid3: #d97706;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px 0; }
+  p.subtitle { color: var(--muted); margin: 0 0 20px 0; font-size: 14px; }
+  .layout { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+  .stage {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px;
+    flex: 1;
+    min-width: 640px;
+  }
+  .band-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+  .controls {
+    width: 300px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+  }
+  .controls h2 { font-size: 14px; margin: 0 0 10px 0; color: var(--accent); }
+  button {
+    display: block;
+    width: 100%;
+    margin-bottom: 8px;
+    padding: 10px 12px;
+    border: none;
+    border-radius: 8px;
+    background: #1d4ed8;
+    color: white;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  button:hover:not(:disabled) { background: #2563eb; }
+  button:disabled { background: #e2e8f0; color: #94a3b8; cursor: not-allowed; }
+  button.secondary { background: #e2e8f0; color: #1e293b; }
+  button.secondary:hover:not(:disabled) { background: #cbd5e1; }
+  .nprobe-row { display: flex; gap: 6px; margin-bottom: 10px; }
+  .nprobe-btn {
+    flex: 1;
+    margin-bottom: 0;
+    background: #e2e8f0;
+    color: #1e293b;
+  }
+  .nprobe-btn.active { background: #1d4ed8; color: white; }
+  .nprobe-btn:disabled { background: #f1f5f9; color: #cbd5e1; }
+  .log {
+    margin-top: 14px;
+    background: #f1f5f9;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+    font-size: 12.5px;
+    line-height: 1.5;
+    max-height: 180px;
+    overflow-y: auto;
+    color: #334155;
+  }
+  .log div { margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid #e2e8f0; }
+  .log div:last-child { border-bottom: none; }
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 12px;
+    font-size: 11.5px;
+    color: var(--muted);
+  }
+  .legend span { display: flex; align-items: center; gap: 5px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .diamond { width: 10px; height: 10px; display: inline-block; transform: rotate(45deg); }
+  svg text { font-size: 12px; fill: var(--text); font-family: inherit; }
+  .step-caption {
+    font-size: 13px;
+    color: var(--accent);
+    margin-top: 10px;
+    min-height: 34px;
+  }
+  .dist-panel {
+    margin-top: 12px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+  }
+  .dist-panel h3 {
+    font-size: 12px;
+    margin: 0 0 10px 0;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+  }
+  .dist-row {
+    display: inline-flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 14px;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    margin: 0 8px 8px 0;
+  }
+  .dist-row.picked { background: #dcfce7; font-weight: 600; color: #15803d; }
+  .dist-row.not-picked { background: #f8fafc; color: #64748b; }
+  .dist-row.excluded { background: #f1f5f9; color: #94a3b8; text-decoration: line-through; }
+  .dist-empty { font-size: 12.5px; color: var(--muted); font-style: italic; }
+  #distList {
+    max-height: 260px;
+    overflow-y: auto;
+    padding-right: 4px;
+  }
+  .step-block {
+    padding-bottom: 10px;
+    margin-bottom: 10px;
+    border-bottom: 1px dashed var(--border);
+  }
+  .step-block:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+  .step-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 6px;
+  }
+  .hop-line {
+    display: block;
+    margin-bottom: 6px;
+  }
+  .hop-rows {
+    display: flex;
+    flex-wrap: wrap;
+  }
+  .recall-callout {
+    margin-top: 10px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: #b91c1c;
+    font-size: 12.5px;
+    line-height: 1.5;
+  }
+  .recall-callout.ok {
+    background: #f0fdf4;
+    border-color: #bbf7d0;
+    color: #15803d;
+  }
+</style>
+</head>
+<body>
+
+<h1>IVF — Building Clusters, Then Navigating a Query</h1>
+<p class="subtitle">Left: chunks get grouped into clusters as they're inserted, with each cluster's centroid recalculating live. Right panel: choose nprobe, then step through comparing centroids and scanning only the selected buckets.</p>
+
+<div class="layout">
+  <div class="stage">
+    <div class="band-label">Clusters (nlist = 3) — centroids shown as diamonds</div>
+    <svg id="svg" width="100%" height="480" viewBox="0 0 900 480"></svg>
+    <div class="legend">
+      <span><i class="diamond" style="background:#64748b"></i> centroid</span>
+      <span><i class="dot" style="background:var(--node)"></i> member chunk</span>
+      <span><i class="dot" style="background:var(--node-current)"></i> query</span>
+      <span><i class="dot" style="background:var(--node-scanned)"></i> scanned</span>
+      <span><i class="dot" style="background:var(--node-final)"></i> final answer</span>
+    </div>
+
+    <div class="dist-panel">
+      <h3>Distance comparison (this step) — actual distance from each node/centroid to the query's position</h3>
+      <div id="distList"><span class="dist-empty">No comparison yet.</span></div>
+      <!-- Intentionally left empty/unused — see showRecallCallout() in the
+           script below for why the recall-miss/match text was disabled. -->
+      <div id="recallCallout"></div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <h2>1. Build the index</h2>
+    <button id="buildStep">Insert next chunk</button>
+    <button id="buildAll" class="secondary">Insert all remaining</button>
+    <button id="resetBuild" class="secondary">Reset build</button>
+
+    <!--
+      NPROBE — NO VISUAL CONTROL BY REQUEST.
+      nprobe = how many of the 3 centroids' buckets actually get scanned at
+      query time (out of nlist=3 total clusters). This is the classic IVF
+      speed-vs-recall knob: lower nprobe = fewer buckets scanned = faster
+      but risks missing the true nearest chunk; higher nprobe = safer/more
+      accurate but slower.
+      The presenter explicitly asked to remove the on-page 1/2/3 selector —
+      it's set purely in code now (see `let nprobe = ...` in the script
+      below) rather than exposed as a UI control. Default is 1 on purpose:
+      with the current queryPos, nprobe=1 produces a genuine, verified
+      recall miss (see the big top-of-file comment for the exact numbers).
+      If a future session is asked to change which nprobe value is used,
+      just edit that one JS variable — do not re-add buttons/HTML for this
+      unless explicitly asked to bring the control back.
+    -->
+    <h2 style="margin-top:18px;">2. Run a query</h2>
+    <button id="startQuery" disabled>Compare query to centroids</button>
+    <button id="queryStep" disabled>Scan next bucket</button>
+    <button id="resetAll" class="secondary">Reset everything</button>
+
+    <div class="step-caption" id="caption">Click "Insert next chunk" to begin building the clusters.</div>
+
+    <div class="log" id="log"></div>
+  </div>
+</div>
+
+<script>
+// ---- Same 14 nodes / fixed query point as hnsw_demo.html ----
+// NOTE: the `cluster` field below is now LEGACY / informational only — it
+// reflects the original hardcoded grouping used in an earlier version of
+// this demo. Actual cluster membership is now computed live at insertion
+// time (see clusterMembers / insertNext() below) via nearest-current-
+// centroid assignment, not read from this field. It's kept here only
+// because `isTop` (unused in this file, a leftover from copying
+// hnsw_demo.html's node list) and other legacy code paths still reference
+// it; the computed assignment has been verified to reproduce the same
+// grouping this field describes, but this field itself no longer drives
+// anything in the live build/query logic.
+const nodes = [
+  {id:'A', x:80,  y:310, cluster:1, isTop:true},
+  {id:'B', x:140, y:350, cluster:1, isTop:false},
+  {id:'C', x:110, y:390, cluster:1, isTop:false},
+  {id:'D', x:170, y:310, cluster:1, isTop:false},
+  {id:'E', x:400, y:300, cluster:2, isTop:false},
+  {id:'F', x:450, y:340, cluster:2, isTop:true},
+  {id:'G', x:420, y:390, cluster:2, isTop:false},
+  {id:'H', x:480, y:310, cluster:2, isTop:false},
+  {id:'I', x:520, y:360, cluster:2, isTop:false},
+  {id:'J', x:700, y:310, cluster:3, isTop:false},
+  {id:'K', x:750, y:350, cluster:3, isTop:true},
+  {id:'L', x:720, y:400, cluster:3, isTop:false},
+  {id:'M', x:780, y:310, cluster:3, isTop:false},
+  {id:'N', x:660, y:360, cluster:3, isTop:false},
+];
+const CLUSTER_IDS = [1,2,3];
+const CLUSTER_COLORS = { 1:'#e0f2fe', 2:'#dcfce7', 3:'#fef3c7' };
+const CENTROID_COLORS = { 1:'#0284c7', 2:'#16a34a', 3:'#d97706' };
+
+// ----------------------------------------------------------------------------
+// CLUSTER ASSIGNMENT — computed, not hardcoded (per presenter request).
+//
+// Real k-means runs many rounds: assign the WHOLE dataset to the nearest of
+// nlist centroids, recompute all centroids as the mean of what they were
+// just assigned, then RE-assign the whole dataset again (since centroids
+// moved, some points now belong to a different centroid than last round),
+// and repeat until nothing changes (convergence).
+//
+// This demo deliberately uses a SIMPLER, one-pass version instead, per an
+// explicit decision with the presenter: each cluster starts from an initial
+// SEED position (a rough starting guess, standing in for k-means' random/
+// k-means++ initialization), and chunks are assigned ONE AT A TIME, in
+// insertion order, to whichever of the 3 centroids is nearest AT THAT
+// MOMENT — using the running mean of whatever's been assigned so far (or
+// the raw seed, if nothing has joined that cluster yet). Once assigned, a
+// chunk's cluster is PERMANENT — it is never revisited or reassigned later,
+// even though centroids keep shifting as more chunks join. This intentionally
+// skips real k-means' multi-round reassignment/convergence step, which was
+// judged unnecessary complexity for a live teaching walkthrough (a person
+// watching several rounds of numbers silently flicker doesn't gain much).
+//
+// Why this doesn't just produce a mess: node positions here are grouped
+// into 3 well-separated regions (huge x-axis gaps between them), so as long
+// as the 3 seeds are placed one per region (not all bunched together), the
+// running-nearest-centroid logic reliably reproduces the same 3 groupings
+// {A,B,C,D} / {E,F,G,H,I} / {J,K,L,M,N} that the OLD hardcoded version used
+// — this was verified by simulation before shipping this version. If you
+// ever change node positions or these seed values, re-run that simulation
+// (assign sequentially, in insertion order, recording which cluster each
+// node lands in) before trusting the result — don't just eyeball it.
+// ----------------------------------------------------------------------------
+const SEED_CENTROIDS = { 1: {x:100, y:350}, 2: {x:450, y:350}, 3: {x:700, y:350} };
+let clusterMembers = { 1: [], 2: [], 3: [] }; // node ids, populated as insertNext() runs
+
+let insertedCount = 0;
+let nprobe = 1; // default = 1, deliberately chosen to produce a genuine recall miss on first run — see top-of-file comment
+
+let queryActive = false;
+const queryPos = {x: 588, y: 368}; // NOTE: deliberately NOT identical to hnsw_demo.html's queryPos —
+// see top-of-file comment: the original shared point produces a tie/no-miss
+// for IVF's cluster math, so this was adjusted to create a genuine, verified
+// nprobe=1 recall-miss. Node layout (positions, clusters) is still identical.
+
+function dist(a,b){ return Math.hypot(a.x-b.x, a.y-b.y); }
+function fmt(d){ return d.toFixed(1); }
+
+function insertedMembersOf(clusterId){
+  return clusterMembers[clusterId].map(id => nodes.find(n => n.id === id));
+}
+
+// Centroid = SEED position until a cluster has at least one real member,
+// then the live mean position of everything assigned to it so far.
+function getCentroid(clusterId){
+  const members = insertedMembersOf(clusterId);
+  if (members.length === 0) return SEED_CENTROIDS[clusterId];
+  const sx = members.reduce((s,n)=>s+n.x,0) / members.length;
+  const sy = members.reduce((s,n)=>s+n.y,0) / members.length;
+  return {x: sx, y: sy};
+}
+
+function insertNext(){
+  if (insertedCount >= nodes.length) return;
+  const node = nodes[insertedCount];
+  insertedCount++;
+
+  // Compute distance to all 3 CURRENT centroids (seed, or running mean —
+  // whichever applies) and assign to whichever is nearest RIGHT NOW. This
+  // assignment is permanent — unlike real k-means, we never revisit it.
+  const distsToEach = CLUSTER_IDS.map(cid => ({ cid, d: dist(node, getCentroid(cid)) }));
+  const nearest = distsToEach.reduce((a,b) => b.d < a.d ? b : a);
+  clusterMembers[nearest.cid].push(node.id);
+
+  const centroid = getCentroid(nearest.cid);
+  const distSummary = distsToEach.map(o => `Cluster ${o.cid}=${fmt(o.d)}`).join(', ');
+  const msg = `Inserted <b>${node.id}</b>. Distance to each current centroid — ${distSummary}. Nearest is <b>Cluster ${nearest.cid}</b>, so ${node.id} joins it. Centroid ${nearest.cid} recalculated to (${fmt(centroid.x)}, ${fmt(centroid.y)}).`;
+  log(msg);
+  render();
+
+  if (insertedCount === nodes.length){
+    document.getElementById('startQuery').disabled = false;
+    document.getElementById('caption').textContent = 'All chunks clustered. 3 centroids are set. Choose an nprobe value, then compare the query to the centroids.';
+  } else {
+    document.getElementById('caption').innerHTML = msg;
+  }
+}
+
+function insertAll(){
+  while (insertedCount < nodes.length) insertNext();
+}
+
+function resetBuild(){
+  insertedCount = 0;
+  clusterMembers = { 1: [], 2: [], 3: [] };
+  document.getElementById('startQuery').disabled = true;
+  document.getElementById('queryStep').disabled = true;
+  queryActive = false;
+  stepBlocks = [];
+  document.getElementById('log').innerHTML = '';
+  document.getElementById('distList').innerHTML = '<span class="dist-empty">No comparison yet.</span>';
+  document.getElementById('recallCallout').innerHTML = '';
+  document.getElementById('caption').textContent = 'Click "Insert next chunk" to begin building the clusters.';
+  render();
+}
+
+function resetAll(){ resetBuild(); }
+
+// setNprobe()/nprobe buttons removed by request — nprobe is now set purely
+// via the `let nprobe = 1;` variable above. If a UI control is ever wanted
+// back, re-add a function here that sets `nprobe` and re-add matching
+// buttons/CSS (.nprobe-btn styles are still in the <style> block, unused).
+
+// ----------------------------------------------------------------------------
+// DISTANCE COMPARISON PANEL — data model (mirrors hnsw_demo.html's stepBlocks)
+// stepBlocks[0] = "Centroid comparison" — all 3 centroids compared at once,
+//   top-nprobe highlighted green ("selected"), rest grayed ("excluded").
+//   This is the one intentional divergence from HNSW's single-highlight rule
+//   — see top-of-file comment for why that's fine here.
+// stepBlocks[1] = "Bucket scan" — one hop-line per scanned bucket, in
+//   nearest-centroid-first order, with a running SINGLE global-min highlight
+//   across all rows so far (same rule as HNSW's bottom layer).
+// ----------------------------------------------------------------------------
+let stepBlocks = [];
+
+function renderDistPanelFromBlocks(){
+  const el = document.getElementById('distList');
+  if (stepBlocks.length === 0){
+    el.innerHTML = '<span class="dist-empty">No comparison yet.</span>';
+    return;
+  }
+  let html = '';
+  stepBlocks.forEach((block) => {
+    html += `<div class="step-block"><div class="step-title">${block.title}</div>`;
+    block.hops.forEach(hop => {
+      html += `<div class="hop-line"><div class="hop-rows">`;
+      hop.rows.forEach(row => {
+        html += `<div class="dist-row ${row.cls}"><span>${row.label}${row.tag || ''}</span><span>${row.value !== null ? fmt(row.value) : ''}</span></div>`;
+      });
+      html += `</div></div>`;
+    });
+    html += `</div>`;
+  });
+  el.innerHTML = html;
+  el.scrollTop = el.scrollHeight;
+}
+
+function startQuery(){
+  queryActive = true;
+  document.getElementById('startQuery').disabled = true;
+  document.getElementById('queryStep').disabled = false;
+  document.getElementById('recallCallout').innerHTML = '';
+  stepBlocks = [];
+
+  // Step 1 — compare query to ALL 3 centroids (always all 3, regardless of nprobe)
+  const centroidDists = CLUSTER_IDS.map(cid => {
+    const c = getCentroid(cid);
+    return { cluster: cid, centroid: c, d: dist(c, queryPos) };
+  }).sort((a,b) => a.d - b.d);
+
+  const selected = centroidDists.slice(0, nprobe).map(o => o.cluster);
+  window.__ivfSelected = selected; // used by scanNextBucket
+  window.__ivfQueue = centroidDists.slice(0, nprobe).map(o => o.cluster); // nearest-first scan order
+  window.__ivfGlobalBest = null; // {label,value,nodeId}
+
+  const rows = centroidDists.map(o => ({
+    label: `Cluster ${o.cluster} centroid → query`,
+    value: o.d,
+    cls: selected.includes(o.cluster) ? 'picked' : 'excluded',
+    tag: selected.includes(o.cluster) ? ' (selected — will scan)' : ` (excluded — nprobe=${nprobe})`
+  }));
+
+  stepBlocks.push({ title: 'Step 1 — Centroid comparison', hops: [{ rows }] });
+  renderDistPanelFromBlocks();
+
+  const msg = `Compared the query to all 3 centroids. With nprobe=${nprobe}, scanning Cluster ${selected.join(' and Cluster ')} — the rest are skipped entirely.`;
+  log(msg);
+  document.getElementById('caption').innerHTML = msg;
+  render();
+}
+
+function scanNextBucket(){
+  const queue = window.__ivfQueue;
+  if (!queue || queue.length === 0) return;
+
+  const clusterId = queue.shift();
+  const members = insertedMembersOf(clusterId);
+  const rows = members
+    .map(n => ({ n, d: dist(n, queryPos) }))
+    .sort((a,b) => a.d - b.d)
+    .map(o => ({ label: `${o.n.id} → query`, value: o.d, nodeId: o.n.id }));
+
+  // update running GLOBAL best across all bucket-scan rows seen so far (all hops, all buckets)
+  let block = stepBlocks.find(b => b.title === 'Step 2 — Bucket scan');
+  if (!block){
+    block = { title: 'Step 2 — Bucket scan', hops: [] };
+    stepBlocks.push(block);
+  }
+  block.hops.push({ rows });
+
+  let globalBest = window.__ivfGlobalBest;
+  block.hops.forEach(hop => hop.rows.forEach(row => {
+    if (globalBest === null || row.value < globalBest.value) globalBest = row;
+  }));
+  window.__ivfGlobalBest = globalBest;
+
+  const isLastBucket = queue.length === 0;
+
+  // recompute display classes/tags for ALL rows so far based on current global best
+  block.hops.forEach(hop => hop.rows.forEach(row => {
+    const isBest = globalBest && row.nodeId === globalBest.nodeId && row.value === globalBest.value;
+    if (isLastBucket && isBest){
+      row.cls = 'picked'; row.tag = ' ✓ final answer';
+    } else if (isBest){
+      row.cls = 'picked'; row.tag = ' ← nearest so far';
+    } else {
+      row.cls = 'not-picked'; row.tag = '';
+    }
+  }));
+
+  renderDistPanelFromBlocks();
+
+  const msg = `Scanned Cluster ${clusterId}'s bucket (${members.map(m=>m.id).join(', ')}). Nearest so far: <b>${globalBest.label.replace(' → query','')}</b> at ${fmt(globalBest.value)}.`;
+  log(msg);
+  document.getElementById('caption').innerHTML = msg;
+
+  if (isLastBucket){
+    document.getElementById('queryStep').disabled = true;
+    // showRecallCallout(globalBest); // intentionally disabled per presenter request —
+    // the red "recall miss" / green "true nearest" text was judged extra
+    // complexity not needed for the live walkthrough. The final-answer
+    // highlighting in the distance panel and on the graph itself (green
+    // node/row) is enough on its own. Function kept below, just unused, in
+    // case a future session is asked to re-enable it.
+  }
+  render();
+}
+
+// Compares the achieved answer against the TRUE global nearest across all 14
+// nodes (ignoring nprobe entirely). NOT CALLED ANYWHERE right now — see the
+// comment above the (commented-out) call site in scanNextBucket() for why.
+// Left in place, unused, in case a future session is asked to bring this
+// back; safe to delete entirely if this capability is never wanted again.
+// NOTE: this function still reads the legacy `n.cluster` field (the old
+// hardcoded assignment) rather than the live-computed `clusterMembers`
+// state used everywhere else. They currently agree for all 14 nodes (see
+// the cluster-assignment comment near SEED_CENTROIDS above), but if this
+// function is ever revived, switch it to look up cluster via
+// clusterMembers instead, in case the two ever diverge.
+function showRecallCallout(achieved){
+  const trueNearest = nodes.slice(0, insertedCount)
+    .map(n => ({ n, d: dist(n, queryPos) }))
+    .sort((a,b) => a.d - b.d)[0];
+
+  const el = document.getElementById('recallCallout');
+  if (trueNearest.n.id === achieved.nodeId){
+    el.innerHTML = `<div class="recall-callout ok">✓ This is also the TRUE nearest chunk across all ${insertedCount} chunks — nprobe=${nprobe} found the correct answer this time.</div>`;
+  } else {
+    el.innerHTML = `<div class="recall-callout">⚠ Recall miss: the true nearest chunk overall is <b>${trueNearest.n.id}</b> (Cluster ${trueNearest.n.cluster}, distance ${fmt(trueNearest.d)}) — but with nprobe=${nprobe}, that cluster was never scanned, so the search returned <b>${achieved.nodeId}</b> instead.</div>`;
+  }
+}
+
+function log(html){
+  const el = document.getElementById('log');
+  const div = document.createElement('div');
+  div.innerHTML = html;
+  el.prepend(div);
+}
+
+function render(){
+  const svg = document.getElementById('svg');
+  svg.innerHTML = '';
+
+  // cluster background regions (soft rounded rects behind each group)
+  const regions = {
+    1: {x:40, y:250, w:200, h:220},
+    2: {x:360, y:250, w:220, h:220},
+    3: {x:630, y:250, w:220, h:220},
+  };
+  CLUSTER_IDS.forEach(cid => {
+    const r = regions[cid];
+    svg.innerHTML += `<rect x="${r.x}" y="${r.y}" width="${r.w}" height="${r.h}" rx="14" fill="${CLUSTER_COLORS[cid]}"/>`;
+    svg.innerHTML += `<text x="${r.x+12}" y="${r.y+22}" fill="${CENTROID_COLORS[cid]}" font-weight="bold">CLUSTER ${cid}</text>`;
+  });
+
+  // lines from centroid to each member
+  CLUSTER_IDS.forEach(cid => {
+    const centroid = getCentroid(cid);
+    if (!centroid) return;
+    insertedMembersOf(cid).forEach(n => {
+      svg.innerHTML += `<line x1="${centroid.x}" y1="${centroid.y}" x2="${n.x}" y2="${n.y}" stroke="#94a3b8" stroke-width="1" stroke-dasharray="3,3"/>`;
+    });
+  });
+
+  // query marker
+  if (queryActive){
+    svg.innerHTML += `<circle cx="${queryPos.x}" cy="${queryPos.y}" r="9" fill="none" stroke="#f472b6" stroke-width="2.5"/>`;
+    svg.innerHTML += `<text x="${queryPos.x-18}" y="${queryPos.y-14}" fill="#f472b6">query</text>`;
+  }
+
+  // member nodes
+  const scannedIds = new Set();
+  const finalId = (window.__ivfGlobalBest && document.getElementById('queryStep').disabled && queryActive) ? window.__ivfGlobalBest.nodeId : null;
+  if (stepBlocks.length > 1){
+    stepBlocks[1].hops.forEach(hop => hop.rows.forEach(r => scannedIds.add(r.nodeId)));
+  }
+  nodes.slice(0, insertedCount).forEach(n=>{
+    let fill = 'var(--node)';
+    if (finalId === n.id) fill = '#22c55e';
+    else if (scannedIds.has(n.id)) fill = '#f59e0b';
+    svg.innerHTML += `<circle cx="${n.x}" cy="${n.y}" r="14" fill="${fill}" stroke="#0f172a" stroke-width="2"/>`;
+    svg.innerHTML += `<text x="${n.x-4}" y="${n.y+4}" fill="#0f172a" font-weight="bold">${n.id}</text>`;
+  });
+
+  // centroid diamonds (drawn last so they sit visibly above connector lines)
+  CLUSTER_IDS.forEach(cid => {
+    const centroid = getCentroid(cid);
+    if (!centroid) return;
+    const s = 9;
+    const cx = centroid.x, cy = centroid.y;
+    const points = `${cx},${cy-s} ${cx+s},${cy} ${cx},${cy+s} ${cx-s},${cy}`;
+    svg.innerHTML += `<polygon points="${points}" fill="${CENTROID_COLORS[cid]}" stroke="#0f172a" stroke-width="1.5"/>`;
+  });
+}
+
+document.getElementById('buildStep').onclick = insertNext;
+document.getElementById('buildAll').onclick = insertAll;
+document.getElementById('resetBuild').onclick = resetBuild;
+document.getElementById('startQuery').onclick = startQuery;
+document.getElementById('queryStep').onclick = scanNextBucket;
+document.getElementById('resetAll').onclick = resetAll;
+// (no .nprobe-btn binding — control removed by request, see comment above resetAll())
+
+render();
+</script>
+</body>
+</html>

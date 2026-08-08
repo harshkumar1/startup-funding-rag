@@ -1,0 +1,673 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>HNSW: Build & Query Walkthrough</title>
+<!--
+  ============================================================================
+  CONTEXT FOR FUTURE EDITS (read this before changing anything)
+  ============================================================================
+  PURPOSE
+  This is a teaching demo built for a presenter explaining HNSW (Hierarchical
+  Navigable Small World graphs, used by Milvus/vector DBs) to a live audience.
+  It has two parts:
+    1. GRAPH BUILD — click through inserting 14 fictional "chunks" (A–N) one
+       at a time. Each insertion connects the new node to its nearest already-
+       existing neighbor(s), both at the bottom layer (dense) and, for 3 of
+       the nodes, also at a sparse top layer ("highway" nodes).
+    2. QUERY WALKTHROUGH — after the graph is built, step through a simulated
+       query greedily hopping through the top layer, dropping to the bottom
+       layer, and continuing until it lands on a final answer. A live
+       "distance comparison" panel shows the real Euclidean distance from
+       each compared node to the query, so the audience can see the actual
+       numbers driving each hop decision (not just "trust me, it's closer").
+
+  DATA MODEL — key thing to understand before editing
+  - `nodes` = fixed array of 14 chunks with hardcoded (x,y) positions,
+    grouped visually into 3 "semantic clusters". 3 of them have `isTop:true`
+    (A, F, K) meaning they also get placed on the sparse top layer.
+  - Edges are NOT designed in advance — they are computed incrementally as
+    each node is "inserted" (in array order), by finding the true nearest
+    already-inserted node(s) via Euclidean distance. This mirrors how real
+    HNSW builds incrementally, and was done deliberately so the graph in the
+    demo is an honest reflection of the distances, not a fabricated diagram.
+  - TOP_LAYER_M = 1 (each top-layer node keeps only its single nearest
+    top-layer neighbor) was chosen deliberately so the top layer forms a
+    sparse CHAIN (A–F–K), not a triangle. An earlier version used M=2 and
+    every top node ended up connected to every other top node, which made
+    it look like the search was comparing against all top-layer nodes at
+    once — misleading, since real HNSW top layers only have a handful of
+    edges per node even at huge scale. Don't casually bump this back up
+    without understanding why it was set to 1.
+  - BOTTOM_LAYER_M = 2 (each node connects to its 2 nearest already-inserted
+    neighbors at the bottom/dense layer).
+  - queryPos = a single fixed (x,y) standing in for "the query's embedding".
+    It's just a point in the same 2D space as the nodes — distance to it is
+    plain Euclidean distance, used as a stand-in for real vector distance.
+
+  QUERY WALKTHROUGH MECHANICS — this went through several rounds of
+  correction with the presenter and the current design is intentional:
+  - The greedy search only ever compares the "current" node against nodes
+    it's DIRECTLY connected to at the CURRENT layer (getEdges()) — never a
+    global list of all nodes in a layer. This is the single most important
+    accuracy point of the whole demo (real HNSW never has global visibility).
+  - Search starts at the first top-layer node (topNodes[0], i.e. 'A'),
+    hops greedily layer by layer, and once no top-layer neighbor is closer
+    than the current node, it "drops" to the bottom-layer version of that
+    same node and continues there until no bottom-layer neighbor is closer
+    either — that becomes the final answer.
+  - The distance panel groups comparisons into "Step N — Top/Bottom layer"
+    blocks (one block per layer, NOT one block per hop) — see `stepBlocks`.
+  - WITHIN a layer's block, each hop renders as its own line, and each line
+    MERGES the previous "pivot" node's distance (repeated, for continuity)
+    with whatever NEW node(s) are being compared this hop. E.g.:
+      Line 1: "A (entry) → query  531.2"   "F → query  160.1"
+      Line 2: "F → query  160.1"           "K → query ← nearest  140.1" (green)
+    This merged-line format was specifically requested by the presenter
+    after trying (and rejecting) two earlier designs: (a) one block per
+    individual hop with a numbered "Step N — at X" title each time, and
+    (b) one block per layer but with an italic "From X's neighbors:" label
+    line above each hop's rows. Both were replaced because they wasted
+    space and/or repeated information the presenter didn't want spoken.
+  - Within a layer's block, a node already shown once (tracked via
+    `block.seenIds`) is NEVER shown again — e.g. if we hop A→F and F's
+    neighbor list happens to include A again, A is silently skipped rather
+    than reprinted. This was a specific bug fix (A's distance was
+    originally printed twice because both the entry hop and the F-hop
+    both listed it).
+  - Only ONE row per layer-block is ever highlighted green ("← nearest so
+    far" / "✓ final answer") at any time — the SINGLE global minimum
+    distance seen so far in that block, recomputed fresh on every render
+    (see `minRow` logic in renderDistPanelFromBlocks). Earlier versions
+    accidentally highlighted one node per hop independently, leaving
+    multiple green rows simultaneously — that was reported as a bug and
+    fixed. Do NOT reintroduce per-hop-independent highlighting.
+  - We deliberately do NOT implement "top-3 candidate" coloring (green/
+    yellow/purple) — this was discussed with the presenter and rejected
+    because the top layer only has 3 nodes total, so a "top-3" shortlist
+    would be meaningless there (it's literally all of them). The bottom
+    layer alone would have enough nodes for it to make sense, but for
+    consistency between the two layers, we kept single-nearest-only
+    highlighting everywhere. If asked to add multi-candidate coloring in
+    future, reconsider doing it only for the bottom layer, and be aware
+    this depicts something closer to the `ef` (exploration factor) /
+    candidate-pool behavior in real HNSW, not the plain greedy walk this
+    demo otherwise shows.
+
+  KNOWN SIMPLIFICATIONS (intentional, not bugs — worth telling the
+  presenter if asked, but don't "fix" them without discussion)
+  - Real HNSW keeps a running candidate list per search (governed by the
+    `ef` parameter) rather than a single strict greedy path with zero
+    backtracking. This demo intentionally uses the simpler strict-greedy
+    version throughout (both layers) for teaching clarity.
+  - Real HNSW layer depth/assignment is randomized per-node at insertion
+    time with exponentially decaying probability (most nodes: bottom layer
+    only; a few also promoted higher). This demo hardcodes exactly 2 layers
+    and hardcodes which 3 nodes (A, F, K) are "promoted" to the top layer,
+    rather than actually randomizing it — done for a repeatable, presenter-
+    friendly walkthrough rather than a stochastic one.
+  - Once built, the graph never rebalances/prunes old edges (this matches
+    real HNSW insert behavior — edges are not revisited after insertion).
+
+  THEME
+  Light/white theme by explicit request (presenter does not like dark UIs).
+  CSS custom properties are all defined in :root — change colors there,
+  not by hunting for hardcoded hex values, EXCEPT inside the render()/
+  renderDistPanelFromBlocks() JS functions, which build raw SVG/HTML
+  strings and use hardcoded hex colors directly (SVG fill attributes don't
+  reliably resolve CSS vars in innerHTML-injected strings in all browsers,
+  so these were kept as literal hex codes intentionally).
+
+  IF YOU ARE ASKED TO CHANGE THIS FILE
+  - Preserve the "merged-line" distance panel format unless explicitly
+    asked to change it again — it was arrived at after several rounds of
+    rejected alternatives (see above).
+  - Preserve TOP_LAYER_M = 1 unless asked to add more top-layer nodes at
+    the same time (adding nodes without changing M, or changing M without
+    understanding the triangle-vs-chain issue above, will silently
+    reintroduce a rejected design).
+  - The build order of `nodes` (A through N, in array order) IS the
+    insertion order used by insertNext() — position in the array matters.
+  - If asked to make the query path different (e.g. change which node is
+    "closest" to demonstrate a different scenario), the only thing that
+    needs to change is `queryPos` (the fixed query coordinate) — everything
+    else (edges, distances, highlighting) recomputes automatically from it.
+  ============================================================================
+-->
+<style>
+  :root {
+    --bg: #ffffff;
+    --panel: #f8fafc;
+    --node: #cbd5e1;
+    --node-top: #38bdf8;
+    --node-visited: #f59e0b;
+    --node-current: #ef4444;
+    --node-final: #22c55e;
+    --text: #1e293b;
+    --muted: #64748b;
+    --accent: #0284c7;
+    --border: #e2e8f0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 24px;
+  }
+  h1 { font-size: 20px; margin: 0 0 4px 0; }
+  p.subtitle { color: var(--muted); margin: 0 0 20px 0; font-size: 14px; }
+  .layout { display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+  .stage {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 12px;
+    flex: 1;
+    min-width: 640px;
+  }
+  .band-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+  .controls {
+    width: 300px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+  }
+  .controls h2 { font-size: 14px; margin: 0 0 10px 0; color: var(--accent); }
+  button {
+    display: block;
+    width: 100%;
+    margin-bottom: 8px;
+    padding: 10px 12px;
+    border: none;
+    border-radius: 8px;
+    background: #1d4ed8;
+    color: white;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  button:hover:not(:disabled) { background: #2563eb; }
+  button:disabled { background: #e2e8f0; color: #94a3b8; cursor: not-allowed; }
+  button.secondary { background: #e2e8f0; color: #1e293b; }
+  button.secondary:hover:not(:disabled) { background: #cbd5e1; }
+  .log {
+    margin-top: 14px;
+    background: #f1f5f9;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+    font-size: 12.5px;
+    line-height: 1.5;
+    max-height: 180px;
+    overflow-y: auto;
+    color: #334155;
+  }
+  .log div { margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid #e2e8f0; }
+  .log div:last-child { border-bottom: none; }
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 12px;
+    font-size: 11.5px;
+    color: var(--muted);
+  }
+  .legend span { display: flex; align-items: center; gap: 5px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  svg text { font-size: 12px; fill: var(--text); font-family: inherit; }
+  .step-caption {
+    font-size: 13px;
+    color: var(--accent);
+    margin-top: 10px;
+    min-height: 34px;
+  }
+  .dist-panel {
+    margin-top: 12px;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+  }
+  .dist-panel h3 {
+    font-size: 12px;
+    margin: 0 0 10px 0;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+  }
+  .dist-row {
+    display: inline-flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 14px;
+    padding: 6px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    margin: 0 8px 8px 0;
+  }
+  .dist-row.picked { background: #dcfce7; font-weight: 600; color: #15803d; }
+  .dist-row.not-picked { background: #f8fafc; color: #64748b; }
+  .dist-empty { font-size: 12.5px; color: var(--muted); font-style: italic; }
+  #distList {
+    max-height: 260px;
+    overflow-y: auto;
+    padding-right: 4px;
+  }
+  .step-block {
+    padding-bottom: 10px;
+    margin-bottom: 10px;
+    border-bottom: 1px dashed var(--border);
+  }
+  .step-block:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+  .step-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--text);
+    margin-bottom: 6px;
+  }
+  .hop-line {
+    display: block;
+    margin-bottom: 6px;
+  }
+  .hop-label {
+    font-size: 11px;
+    color: var(--muted);
+    font-style: italic;
+    margin-bottom: 3px;
+  }
+  .hop-rows {
+    display: flex;
+    flex-wrap: wrap;
+  }
+</style>
+</head>
+<body>
+
+<h1>HNSW — Building the Graph, Then Navigating a Query</h1>
+<p class="subtitle">Left: nodes get added one at a time, connecting only to their nearest existing neighbors. Right panel: step through how a query hops down through the layers, comparing real distances at each step.</p>
+
+<div class="layout">
+  <div class="stage">
+    <div class="band-label">Top layer (sparse — long-range "highway" nodes)</div>
+    <svg id="svg" width="100%" height="480" viewBox="0 0 900 480"></svg>
+    <div class="legend">
+      <span><i class="dot" style="background:var(--node-top)"></i> top-layer node</span>
+      <span><i class="dot" style="background:var(--node)"></i> bottom-layer node</span>
+      <span><i class="dot" style="background:var(--node-current)"></i> query's current position</span>
+      <span><i class="dot" style="background:var(--node-visited)"></i> visited</span>
+      <span><i class="dot" style="background:var(--node-final)"></i> final answer</span>
+    </div>
+
+    <div class="dist-panel">
+      <h3>Distance comparison (this step) — actual distance from each node's position to the query's position</h3>
+      <div id="distList"><span class="dist-empty">No comparison yet.</span></div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <h2>1. Build the graph</h2>
+    <button id="buildStep">Insert next chunk</button>
+    <button id="buildAll" class="secondary">Insert all remaining</button>
+    <button id="resetBuild" class="secondary">Reset build</button>
+
+    <h2 style="margin-top:18px;">2. Run a query</h2>
+    <button id="startQuery" disabled>Start query at top layer</button>
+    <button id="queryStep" disabled>Next hop</button>
+    <button id="resetAll" class="secondary">Reset everything</button>
+
+    <div class="step-caption" id="caption">Click "Insert next chunk" to begin building the graph.</div>
+
+    <div class="log" id="log"></div>
+  </div>
+</div>
+
+<script>
+// ---- Node definitions: 3 semantic "clusters" of chunks ----
+// Positions are hand-placed (not randomly generated) so the resulting graph
+// is deterministic and repeatable across page loads — important for a live
+// teaching demo. Array ORDER = insertion order used by insertNext() below.
+// isTop:true (A, F, K) = the 3 nodes that also get placed on the sparse
+// top layer; everything else lives on the bottom layer only.
+const nodes = [
+  {id:'A', x:80,  y:310, cluster:1, isTop:true},
+  {id:'B', x:140, y:350, cluster:1, isTop:false},
+  {id:'C', x:110, y:390, cluster:1, isTop:false},
+  {id:'D', x:170, y:310, cluster:1, isTop:false},
+  {id:'E', x:400, y:300, cluster:2, isTop:false},
+  {id:'F', x:450, y:340, cluster:2, isTop:true},
+  {id:'G', x:420, y:390, cluster:2, isTop:false},
+  {id:'H', x:480, y:310, cluster:2, isTop:false},
+  {id:'I', x:520, y:360, cluster:2, isTop:false},
+  {id:'J', x:700, y:310, cluster:3, isTop:false},
+  {id:'K', x:750, y:350, cluster:3, isTop:true},
+  {id:'L', x:720, y:400, cluster:3, isTop:false},
+  {id:'M', x:780, y:310, cluster:3, isTop:false},
+  {id:'N', x:660, y:360, cluster:3, isTop:false},
+];
+
+const TOP_Y = 90;   // y-position band for top-layer rendering
+const TOP_LAYER_M = 1;    // <-- sparser: only 1 nearest top-layer neighbor per node
+const BOTTOM_LAYER_M = 2; // bottom layer keeps 2 nearest neighbors
+
+let insertedCount = 0;
+let edgesBottom = [];
+let edgesTop = [];
+
+let queryActive = false;
+let queryLayer = null; // 'top' | 'bottom'
+let current = null;
+let visited = [];
+let finalNode = null;
+const queryPos = {x: 610, y: 345}; // fixed query embedding position for the demo
+
+function dist(a,b){ return Math.hypot(a.x-b.x, a.y-b.y); }
+function fmt(d){ return d.toFixed(1); }
+
+function insertNext(){
+  if (insertedCount >= nodes.length) return;
+  const node = nodes[insertedCount];
+  const existing = nodes.slice(0, insertedCount);
+
+  let msg = `Inserted <b>${node.id}</b>. `;
+
+  if (existing.length > 0){
+    const sorted = existing.slice().sort((a,b)=>dist(node,a)-dist(node,b));
+    const k = Math.min(BOTTOM_LAYER_M, sorted.length);
+    const neighbors = sorted.slice(0,k);
+    neighbors.forEach(n => edgesBottom.push([node.id, n.id]));
+    msg += `Connected to nearest existing chunk(s): ${neighbors.map(n=>n.id).join(', ')} (bottom layer). `;
+  } else {
+    msg += `First chunk — no neighbors yet. `;
+  }
+
+  if (node.isTop){
+    const existingTop = existing.filter(n=>n.isTop);
+    if (existingTop.length > 0){
+      const sortedTop = existingTop.slice().sort((a,b)=>dist(node,a)-dist(node,b));
+      const kt = Math.min(TOP_LAYER_M, sortedTop.length);
+      const topNeighbors = sortedTop.slice(0,kt);
+      topNeighbors.forEach(n => edgesTop.push([node.id, n.id]));
+      msg += `Also randomly promoted to the <b>top layer</b> — connected to ${topNeighbors.map(n=>n.id).join(', ')} up there (only its single nearest top-layer neighbor).`;
+    } else {
+      msg += `Also randomly promoted to the <b>top layer</b> as the first top-layer node.`;
+    }
+  }
+
+  insertedCount++;
+  log(msg);
+  render();
+
+  if (insertedCount === nodes.length){
+    document.getElementById('startQuery').disabled = false;
+    document.getElementById('caption').textContent = 'Graph fully built. Note the top layer is now a sparse chain (A–F–K), not a triangle — each node only kept its single nearest top-layer neighbor. Now try running a query.';
+  } else {
+    document.getElementById('caption').innerHTML = msg;
+  }
+}
+
+function insertAll(){
+  while (insertedCount < nodes.length) insertNext();
+}
+
+function resetBuild(){
+  insertedCount = 0;
+  edgesBottom = [];
+  edgesTop = [];
+  document.getElementById('startQuery').disabled = true;
+  document.getElementById('queryStep').disabled = true;
+  queryActive = false;
+  current = null;
+  visited = [];
+  finalNode = null;
+  document.getElementById('log').innerHTML = '';
+  stepBlocks = [];
+  document.getElementById('distList').innerHTML = '<span class="dist-empty">No comparison yet.</span>';
+  document.getElementById('caption').textContent = 'Click "Insert next chunk" to begin building the graph.';
+  render();
+}
+
+function resetAll(){ resetBuild(); }
+
+// ----------------------------------------------------------------------------
+// DISTANCE COMPARISON PANEL — data model
+// stepBlocks = one entry per LAYER visited during the query walk (not one
+// per hop). Each block accumulates every hop's comparisons made while the
+// search stays in that layer, then a NEW block starts when the search drops
+// to the next layer down. See the big comment at the top of the file for the
+// full design history/rationale before changing this structure.
+// ----------------------------------------------------------------------------
+let stepBlocks = []; // [{layer, hops:[{rows:[{label,value,nodeId}]}], seenIds:Set, finalNodeId:null, lastRow:{label,value,nodeId}}]
+
+function newStepBlock(layer){
+  stepBlocks.push({ layer, hops: [], seenIds: new Set(), finalNodeId: null, lastRow: null });
+}
+
+function startHop(){
+  stepBlocks[stepBlocks.length-1].hops.push({ rows: [] });
+}
+
+// Always displays a row (used to repeat the current pivot's distance for context) — does not touch seenIds.
+function addContextRow(label, value, nodeId){
+  const block = stepBlocks[stepBlocks.length-1];
+  block.hops[block.hops.length-1].rows.push({ label, value, nodeId });
+}
+
+// Displays a NEW comparison row and registers it in seenIds so it won't be repeated again later.
+function addComparisonRow(label, value, nodeId){
+  const block = stepBlocks[stepBlocks.length-1];
+  block.hops[block.hops.length-1].rows.push({ label, value, nodeId });
+  if (nodeId !== null) block.seenIds.add(nodeId);
+}
+
+function renderDistPanelFromBlocks(){
+  const el = document.getElementById('distList');
+  if (stepBlocks.length === 0){
+    el.innerHTML = '<span class="dist-empty">No comparison yet.</span>';
+    return;
+  }
+  let html = '';
+  stepBlocks.forEach((block, i) => {
+    const layerName = block.layer === 'top' ? 'Top layer' : 'Bottom layer';
+
+    // find the single nearest (lowest value) row across ALL hops in this block so far
+    let minRow = null;
+    block.hops.forEach(hop => hop.rows.forEach(row => {
+      if (row.value !== null && (minRow === null || row.value < minRow.value)) minRow = row;
+    }));
+
+    html += `<div class="step-block"><div class="step-title">Step ${i+1} — ${layerName}</div>`;
+    block.hops.forEach(hop => {
+      html += `<div class="hop-line"><div class="hop-rows">`;
+      hop.rows.forEach(row => {
+        const isFinal = block.finalNodeId !== null && row.nodeId === block.finalNodeId;
+        const isNearest = minRow && row === minRow;
+        const cls = (isFinal || isNearest) ? 'picked' : 'not-picked';
+        const tag = isFinal ? ' ✓ final answer' : (isNearest ? ' ← nearest so far' : '');
+        html += `<div class="dist-row ${cls}"><span>${row.label}${tag}</span><span>${row.value !== null ? fmt(row.value) : ''}</span></div>`;
+      });
+      html += `</div></div>`;
+    });
+    html += `</div>`;
+  });
+  el.innerHTML = html;
+  el.scrollTop = el.scrollHeight;
+}
+
+function startQuery(){
+  queryActive = true;
+  queryLayer = 'top';
+  const topNodes = nodes.filter(n=>n.isTop);
+  current = topNodes[0].id; // entry point = first top-layer node inserted
+  visited = [current];
+  finalNode = null;
+  stepBlocks = [];
+  document.getElementById('queryStep').disabled = false;
+  document.getElementById('startQuery').disabled = true;
+
+  const entryNode = nodes.find(n=>n.id===current);
+  newStepBlock('top');
+  const block = stepBlocks[stepBlocks.length-1];
+  // pending — not rendered as its own line yet; merges into the first hop's line
+  block.lastRow = { label: `${current} (entry) → query`, value: dist(entryNode, queryPos), nodeId: current };
+  block.seenIds.add(current);
+  renderDistPanelFromBlocks(); // panel still empty at this point — that's expected, first hop renders it
+
+  const msg = `Query enters at the top layer, at node <b>${current}</b> (the entry point).`;
+  log(msg);
+  document.getElementById('caption').innerHTML = msg;
+  render();
+}
+
+// Returns ONLY the nodeIds directly connected to `nodeId` at the given layer.
+// This is the crux of demo accuracy: the query walk (queryStep, below) must
+// only ever compare against what getEdges() returns — never against every
+// node in a layer. Do not "helpfully" widen this to a broader candidate set
+// without re-reading the top-of-file notes on why that was explicitly ruled
+// out earlier.
+function getEdges(nodeId, layer){
+  const edgeList = layer === 'top' ? edgesTop : edgesBottom;
+  const neighborIds = new Set();
+  edgeList.forEach(([a,b]) => {
+    if (a === nodeId) neighborIds.add(b);
+    if (b === nodeId) neighborIds.add(a);
+  });
+  return [...neighborIds];
+}
+
+function queryStep(){
+  if (!queryActive || finalNode) return;
+  const currentNode = nodes.find(n=>n.id===current);
+  const neighborIds = getEdges(current, queryLayer);
+  const neighbors = neighborIds.map(id => nodes.find(n=>n.id===id));
+
+  const currentDist = dist(currentNode, queryPos);
+  let best = null, bestDist = currentDist;
+  neighbors.forEach(n => {
+    const d = dist(n, queryPos);
+    if (d < bestDist){ bestDist = d; best = n; }
+  });
+
+  const block = stepBlocks[stepBlocks.length-1];
+
+  // only genuinely NEW nodes (not already introduced earlier in this block) get displayed —
+  // e.g. A reappearing via F's edge list is skipped, since it was already shown
+  const newNeighbors = neighbors.filter(n => !block.seenIds.has(n.id));
+
+  if (newNeighbors.length > 0){
+    startHop();
+    addContextRow(block.lastRow.label, block.lastRow.value, block.lastRow.nodeId); // repeat current pivot for continuity
+    newNeighbors.forEach(n => addComparisonRow(`${n.id} → query`, dist(n, queryPos), n.id));
+  }
+
+  let msg;
+  if (best){
+    msg = `Comparing <b>${currentNode.id}</b>'s neighbors: only ${neighbors.map(n=>n.id).join(', ')} were even in reach. <b>${best.id}</b> is closest to the query, so we hop there.`;
+    current = best.id;
+    visited.push(current);
+    block.lastRow = { label: `${best.id} → query`, value: bestDist, nodeId: best.id };
+  } else if (queryLayer === 'top'){
+    msg = `Comparing <b>${currentNode.id}</b>'s neighbors (${neighbors.map(n=>n.id).join(', ') || 'none'}): none are closer to the query than ${currentNode.id} itself. Dropping down to the bottom layer at this same node.`;
+    queryLayer = 'bottom';
+    newStepBlock('bottom');
+    const newBlock = stepBlocks[stepBlocks.length-1];
+    newBlock.lastRow = { label: `${current} (dropped in) → query`, value: currentDist, nodeId: current };
+    newBlock.seenIds.add(current);
+  } else {
+    finalNode = current;
+    const finalBlock = stepBlocks[stepBlocks.length-1];
+    finalBlock.finalNodeId = current;
+    const alreadyShown = finalBlock.hops.some(h => h.rows.some(r => r.nodeId === current));
+    if (!alreadyShown){
+      startHop();
+      addComparisonRow(finalBlock.lastRow.label, finalBlock.lastRow.value, finalBlock.lastRow.nodeId);
+    }
+    msg = `Comparing <b>${currentNode.id}</b>'s neighbors: none are closer than ${currentNode.id} itself. <b>${current}</b> is the final nearest match returned to the user.`;
+    document.getElementById('queryStep').disabled = true;
+  }
+  renderDistPanelFromBlocks();
+  log(msg);
+  document.getElementById('caption').innerHTML = msg;
+  render();
+}
+
+function log(html){
+  const el = document.getElementById('log');
+  const div = document.createElement('div');
+  div.innerHTML = html;
+  el.prepend(div);
+}
+
+function render(){
+  const svg = document.getElementById('svg');
+  svg.innerHTML = '';
+
+  // background bands
+  svg.innerHTML += `<rect x="0" y="40" width="900" height="110" rx="10" fill="#e0f2fe"/>`;
+  svg.innerHTML += `<text x="16" y="60" fill="#0369a1">TOP LAYER</text>`;
+  svg.innerHTML += `<rect x="0" y="230" width="900" height="230" rx="10" fill="#dcfce7"/>`;
+  svg.innerHTML += `<text x="16" y="252" fill="#15803d">BOTTOM LAYER (all chunks)</text>`;
+
+  // dashed connectors between top & bottom occurrence of same node
+  nodes.slice(0, insertedCount).filter(n=>n.isTop).forEach(n=>{
+    svg.innerHTML += `<line x1="${n.x}" y1="${TOP_Y+20}" x2="${n.x}" y2="${n.y}" stroke="#94a3b8" stroke-dasharray="4,4" stroke-width="1"/>`;
+  });
+
+  // bottom edges
+  edgesBottom.forEach(([a,b])=>{
+    const na = nodes.find(n=>n.id===a), nb = nodes.find(n=>n.id===b);
+    svg.innerHTML += `<line x1="${na.x}" y1="${na.y}" x2="${nb.x}" y2="${nb.y}" stroke="#94a3b8" stroke-width="1.5"/>`;
+  });
+
+  // top edges
+  edgesTop.forEach(([a,b])=>{
+    const na = nodes.find(n=>n.id===a), nb = nodes.find(n=>n.id===b);
+    svg.innerHTML += `<line x1="${na.x}" y1="${TOP_Y+20}" x2="${nb.x}" y2="${TOP_Y+20}" stroke="#0284c7" stroke-width="2"/>`;
+  });
+
+  // query marker
+  if (queryActive){
+    svg.innerHTML += `<circle cx="${queryPos.x}" cy="${queryPos.y}" r="9" fill="none" stroke="#f472b6" stroke-width="2.5"/>`;
+    svg.innerHTML += `<text x="${queryPos.x-18}" y="${queryPos.y-14}" fill="#f472b6">query</text>`;
+  }
+
+  // bottom-layer nodes
+  nodes.slice(0, insertedCount).forEach(n=>{
+    let fill = 'var(--node)';
+    if (finalNode === n.id) fill = '#22c55e';
+    else if (current === n.id && queryLayer==='bottom') fill = '#ef4444';
+    else if (visited.includes(n.id) && queryLayer==='bottom') fill = '#f59e0b';
+    svg.innerHTML += `<circle cx="${n.x}" cy="${n.y}" r="14" fill="${fill}" stroke="#0f172a" stroke-width="2"/>`;
+    svg.innerHTML += `<text x="${n.x-4}" y="${n.y+4}" fill="#0f172a" font-weight="bold">${n.id}</text>`;
+  });
+
+  // top-layer nodes
+  nodes.slice(0, insertedCount).filter(n=>n.isTop).forEach(n=>{
+    let fill = '#38bdf8';
+    if (current === n.id && queryLayer==='top') fill = '#ef4444';
+    else if (visited.includes(n.id) && queryLayer==='top') fill = '#f59e0b';
+    svg.innerHTML += `<circle cx="${n.x}" cy="${TOP_Y+20}" r="14" fill="${fill}" stroke="#0f172a" stroke-width="2"/>`;
+    svg.innerHTML += `<text x="${n.x-4}" y="${TOP_Y+24}" fill="#0f172a" font-weight="bold">${n.id}</text>`;
+  });
+}
+
+document.getElementById('buildStep').onclick = insertNext;
+document.getElementById('buildAll').onclick = insertAll;
+document.getElementById('resetBuild').onclick = resetBuild;
+document.getElementById('startQuery').onclick = startQuery;
+document.getElementById('queryStep').onclick = queryStep;
+document.getElementById('resetAll').onclick = resetAll;
+
+render();
+</script>
+</body>
+</html>
