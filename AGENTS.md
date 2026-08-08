@@ -137,6 +137,22 @@ step if it can be avoided — keep deploys small and verifiable.
 - Minimal dependencies — `impl/rag_mcp/requirements.txt` should only contain
   what's actually imported; don't add a framework "just in case."
 
+## CI/CD
+
+- `.github/workflows/security-scan.yml` — Trivy scan, see Security section below.
+- `.github/workflows/docker-publish.yml` — builds `impl/rag_mcp/Dockerfile`
+  (context = `impl/rag_mcp/`) and pushes to **GitHub Container Registry**
+  (`ghcr.io/<owner>/rag-mcp`, tags: short commit SHA + `latest` on `main`) on
+  every push to `main` that touches `impl/rag_mcp/**`, or via manual dispatch.
+  Uses the built-in `GITHUB_TOKEN` — no registry secrets to configure. This is
+  separate from the Cloud Run deploy path (`deploy_cloud_run.sh`, which builds
+  via Google Cloud Build instead) — GHCR publishing is for having a
+  versioned, pullable image on GitHub itself; Cloud Run deploys still go
+  through `cloudbuild.yaml`/`deploy_cloud_run.sh` today rather than pulling
+  from GHCR. If these two build paths diverge, that's worth reconciling later
+  (e.g. point Cloud Run at the GHCR image instead of rebuilding via Cloud
+  Build).
+
 ## Security practices in this repo
 
 - `.gitignore` blocks `*password*`, `.env`/`**/.env`, `*.pem`,
