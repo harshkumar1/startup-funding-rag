@@ -1,7 +1,7 @@
 # Requires Python 3.10+ (PEP 604 `X | None` union syntax used throughout,
 # including inside Pydantic models evaluated at runtime — see AGENTS.md).
 fastapi>=0.115.0
-uvicorn>=0.30.0
+uvicorn>=0.52.1
 pymilvus>=2.4.0
 requests>=2.31.0
 llama-index-core>=0.11.0
