@@ -1,7 +1,13 @@
 *password*
+*creds.config
 .env
 **/.env
 *.pem
+# Local-only corporate CA certs for building behind a TLS-intercepting proxy
+# (see impl/Dockerfile) — never commit real certs, even though they
+# aren't secrets, to keep the repo proxy-agnostic.
+impl/certs/*
+!impl/certs/.gitkeep
 __pycache__/
 *.pyc
 .venv/

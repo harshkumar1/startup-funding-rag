@@ -1,0 +1,39 @@
+# Run from this directory (repo root once split out) — normally invoked via
+# deploy_cloud_run.sh, which fills in _SHA from `git rev-parse`:
+#   gcloud builds submit --config cloudbuild.yaml \
+#     --substitutions=_REGION=us-central1,_REPO=startup-funding-rag,_SERVICE=startup-funding-rag,_SHA=<git-sha> .
+substitutions:
+  _REGION: us-central1
+  _REPO: startup-funding-rag
+  _SERVICE: startup-funding-rag
+  _SHA: manual # overridden by deploy_cloud_run.sh; "manual" if run directly without it
+
+steps:
+  # Tag with both the immutable git SHA (what actually gets deployed — see
+  # deploy_cloud_run.sh) and the floating `latest` (convenience pointer only,
+  # matches the GHCR publish workflow's tagging scheme).
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - Dockerfile
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:${_SHA}
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
+      - .
+
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:${_SHA}
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPO}/${_SERVICE}:latest
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+timeout: 1200s

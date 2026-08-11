@@ -10,7 +10,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/rag-mcp
+  IMAGE_NAME: ${{ github.repository_owner }}/startup-funding-rag
 
 jobs:
   build-and-push:
@@ -24,9 +24,21 @@ jobs:
       contents: read
       packages: write
     steps:
+      # workflow_run's own `github.sha` context is the default branch's HEAD at
+      # trigger time, not necessarily the commit that was actually scanned —
+      # resolve the real commit once here and reuse it for both checkout and
+      # the image tag/label below so what gets built always matches what Trivy
+      # scanned.
+      - name: Resolve commit SHA
+        id: vars
+        run: |
+          SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHA:0:7}" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ steps.vars.outputs.sha }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4.2.0
@@ -44,14 +56,16 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=sha,prefix=,format=short
+            type=raw,value=${{ steps.vars.outputs.short_sha }}
             type=raw,value=latest
+          labels: |
+            org.opencontainers.image.revision=${{ steps.vars.outputs.sha }}
 
       - name: Build and push
         uses: docker/build-push-action@v7.3.0
         with:
-          context: impl/rag_mcp
-          file: impl/rag_mcp/Dockerfile
+          context: impl
+          file: impl/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
