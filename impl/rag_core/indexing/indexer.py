@@ -1,10 +1,3 @@
-"""
-`/index-all` orchestration: drop + recreate the collection schema, then
-chunk -> embed -> insert every document from the source repo from scratch.
-
-WARNING: destructive. See `rag_core.indexing.schema.recreate_collection`.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -18,21 +11,10 @@ from .source_repo import load_all_documents
 
 logger = logging.getLogger(__name__)
 
-# Keep individual insert payloads well under Zilliz's per-request size limit.
 _INSERT_BATCH_SIZE = 500
 
 
 def index_all() -> dict:
-    """Full rebuild of the `rag_chunks` collection from the source repo.
-
-    Steps: drop + recreate schema -> fetch every doc from the source repo ->
-    chunk each (token-based, with overlap) -> embed all chunks -> batch
-    insert -> create the vector index.
-
-    Returns:
-        Summary dict with document/chunk counts and the chunk size/overlap
-        used, for the caller (API response) to report back.
-    """
     logger.info("Ingest started.")
     settings = load_settings()
     vector_dim = get_vector_dim()

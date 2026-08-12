@@ -1,8 +1,3 @@
-"""
-Zilliz Cloud (managed Milvus) access — single lazily-initialized MilvusClient,
-shared by both `indexing/` (schema/insert) and `retrieval/` (search).
-"""
-
 from __future__ import annotations
 
 from pymilvus import MilvusClient
@@ -13,7 +8,6 @@ _client: MilvusClient | None = None
 
 
 def get_client() -> MilvusClient:
-    """Return the process-wide MilvusClient instance, connecting on first use."""
     global _client
     if _client is None:
         settings = load_settings()

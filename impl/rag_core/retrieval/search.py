@@ -1,10 +1,3 @@
-"""
-Vector search over the `rag_chunks` collection (Zilliz Cloud).
-
-Schema / index reference: playground/schema_design/schema_design_notebook.ipynb
-(AUTOINDEX + COSINE on `text_vector`).
-"""
-
 from __future__ import annotations
 
 import logging
@@ -43,13 +36,6 @@ def _run_search(
 
 
 def search_chunks(query_vector: list[float], top_k: int) -> list[dict]:
-    """Search the configured collection for the chunks nearest to `query_vector`.
-
-    Args:
-        query_vector: Embedding of the search text (must match the
-            collection's `text_vector` dimension).
-        top_k: Maximum number of chunks to return.
-    """
     settings = load_settings()
     client = get_client()
 
@@ -58,11 +44,6 @@ def search_chunks(query_vector: list[float], top_k: int) -> list[dict]:
     except MilvusException as exc:
         if "not loaded" not in str(exc).lower():
             raise
-        # Zilliz Cloud (serverless/free tier) auto-releases idle collections
-        # from memory to save resources, so a collection indexed a while ago
-        # can come back "not loaded" on the next search with no action on
-        # our end. Load it back in and retry once instead of failing the
-        # request.
         logger.warning(
             "Collection %r not loaded (likely auto-released after "
             "inactivity by Zilliz); loading and retrying search once.",

@@ -1,6 +1,3 @@
-"""POST /search — retrieve relevant chunks and (optionally) generate an
-answer for a question (implemented)."""
-
 from __future__ import annotations
 
 import logging
@@ -31,10 +28,6 @@ class SearchRequest(BaseModel):
 
 
 class GenerationInfo(BaseModel):
-    """The exact generation config + rendered prompt behind `answer` —
-    included in the response itself (not just the logs) so the model,
-    temperature, max_tokens, reasoning_format, system prompt, and rendered
-    user prompt are all visible together in one place."""
 
     model: str
     temperature: float
@@ -62,15 +55,6 @@ class SearchResponse(BaseModel):
 
 @router.post("/search", response_model=SearchResponse)
 def search(request: SearchRequest) -> SearchResponse:
-    """Retrieve the most relevant chunks for a natural-language query, then
-    (by default) generate an answer grounded in those chunks.
-
-    Embeds the query with the same model used to build the collection, runs
-    a vector search against Zilliz Cloud for the nearest chunks, and — unless
-    `generate_answer` is false — passes them to Groq
-    (`rag_core.retrieval.generation.generate_answer`) to produce a final
-    natural-language answer.
-    """
     vector = embed_text(request.query)
     chunks = search_chunks(vector, top_k=request.top_k)
 
@@ -96,9 +80,5 @@ def search(request: SearchRequest) -> SearchResponse:
         generation=generation_info,
     )
 
-    # Logged unconditionally (retrieval-only calls included) so the full
-    # response — chunks, answer, and the exact generation config/prompt that
-    # produced it — is always visible together in the logs, not just in the
-    # HTTP response body.
     logger.info("Search response:\n%s", response.model_dump_json(indent=2))
     return response
