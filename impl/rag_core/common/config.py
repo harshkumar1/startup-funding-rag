@@ -83,6 +83,9 @@ class Settings:
     groq_api_key: str
     generation_timeout_seconds: int
     max_concurrent_generations: int
+    rerank: bool
+    rerank_model: str
+    rerank_candidates: int
 
 
 def load_settings() -> Settings:
@@ -122,4 +125,10 @@ def load_settings() -> Settings:
         groq_api_key=os.getenv("GROQ_API_KEY", ""),
         generation_timeout_seconds=int(os.getenv("GENERATION_TIMEOUT_SECONDS", "30")),
         max_concurrent_generations=int(os.getenv("MAX_CONCURRENT_GENERATIONS", "4")),
+        # Same defaults as sample/retrieval_config.py (top_k / rerank / rerank_model).
+        rerank=os.getenv("RERANK", "true").strip().lower() in ("1", "true", "yes"),
+        rerank_model=os.getenv(
+            "RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"
+        ),
+        rerank_candidates=int(os.getenv("RERANK_CANDIDATES", "8")),
     )

@@ -5,9 +5,8 @@ import logging
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from rag_core.common.embeddings import embed_text
 from rag_core.retrieval.generation import generate_answer
-from rag_core.retrieval.search import search_chunks
+from rag_core.retrieval.search import retrieve_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +15,13 @@ router = APIRouter()
 
 class SearchRequest(BaseModel):
     query: str = Field(..., description="User question / search text.")
-    top_k: int = Field(5, description="Number of chunks to return.")
+    top_k: int = Field(
+        5,
+        description=(
+            "Number of chunks to return after rerank. Vector search fetches "
+            "max(RERANK_CANDIDATES, top_k) first (default 8)."
+        ),
+    )
     generate_answer: bool = Field(
         True,
         description=(
@@ -55,8 +60,7 @@ class SearchResponse(BaseModel):
 
 @router.post("/search", response_model=SearchResponse)
 def search(request: SearchRequest) -> SearchResponse:
-    vector = embed_text(request.query)
-    chunks = search_chunks(vector, top_k=request.top_k)
+    chunks = retrieve_chunks(request.query, top_k=request.top_k)
 
     answer = None
     generation_info = None
