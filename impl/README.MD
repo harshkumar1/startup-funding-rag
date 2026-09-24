@@ -11,6 +11,13 @@ docker build -t startup-funding-rag .
 docker build -t startup-funding-rag:$(git rev-parse --short=7 HEAD) -t startup-funding-rag:latest .
 ```
 
+## Hosted MCP (Hugging Face Space)
+
+- MCP: https://harshkumar1-startup-funding-rag.hf.space/mcp
+- API docs: https://harshkumar1-startup-funding-rag.hf.space/docs
+
+Claude.ai / Claude on phone: Settings → Connectors → add the MCP URL. Claude Desktop can use the same URL with `mcp-remote` instead of localhost.
+
 ## Local Docker (REST + MCP, check in Claude before deploy)
 
 From `impl/`, with `creds.config` at the repo root:

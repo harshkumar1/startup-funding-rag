@@ -1,6 +1,6 @@
 # How this RAG is implemented (`impl/`)
 
-Two HTTP endpoints do the real work. `POST /index-doc` is a stub and is not shown.
+Two HTTP endpoints do the real work. MCP tools `search` and `index_all` call the same routers (`mcp_server.py`, mounted at `/mcp`). `POST /index-doc` is a stub and is not shown.
 
 Default models (env / `generation_config.json` can override):
 
@@ -143,10 +143,62 @@ sequenceDiagram
 
 ---
 
-## Talking points (matches the code)
+## 3. MCP — `GET/POST /mcp`
 
-1. **Index time vs query time.** Chunking happens only on ingest. A question is never split; it is embedded once and used as a vector query.
-2. **Same embedding space.** Index chunks and the query both go through `embed_texts` / `embed_text` against the same HF model.
-3. **Recall then precision.** Milvus returns ~8 neighbors (bi-encoder). The cross-encoder scores `(query, chunk)` pairs and keeps the API `top_k` (default 5).
-4. **Grounded generation.** Groq only sees retrieved chunk text plus URLs from `generation_config.json`. Failures fall back to raw excerpts, not an ungrounded LLM guess.
-5. **What is not implemented.** `POST /index-doc` returns `not_implemented`. There is no eval endpoint in this stack.
+Same process as FastAPI. Tools wrap the routers above; they do not reimplement retrieval.
+
+Hosted URL: `https://harshkumar1-startup-funding-rag.hf.space/mcp`
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Claude
+    participant MCP as FastMCP<br/>mcp_server.py
+    participant SearchAPI as rag_api/routers/search.py
+    participant IndexAPI as rag_api/routers/index_all.py
+
+    Claude->>MCP: tools/call search
+    MCP->>SearchAPI: search(SearchRequest)
+    SearchAPI-->>MCP: SearchResponse
+    MCP-->>Claude: tool result
+
+    Claude->>MCP: tools/call index_all
+    MCP->>IndexAPI: index_all()
+    IndexAPI-->>MCP: IndexAllResponse
+    MCP-->>Claude: tool result
+```
+
+---
+
+## 4. Deployment (high level)
+
+GitHub holds the source. Actions build `impl/Dockerfile`, push GHCR as `:shortSha` and `:latest`, then pin the Hugging Face Space Dockerfile to that SHA and factory-reboot. The Space does not copy `impl/`; it only `FROM`s GHCR. Runtime secrets are Space env vars. Claude talks to `/mcp` on the Space.
+
+The Space process is not the vector DB or the models. Those stay outside the container:
+
+```mermaid
+flowchart LR
+    Dev[git push main]
+    Scan[SecurityScan]
+    Pub[DockerPublish]
+    GHCR["ghcr.io image :shortSha"]
+    Space[HF_Space]
+    Claude[Claude]
+    Zilliz[Zilliz]
+    Infer[HF_Inference]
+    Groq[Groq]
+
+    Dev --> Scan
+    Scan --> Pub
+    Pub --> GHCR
+    Pub --> Space
+    Space --> GHCR
+    Claude -->|"HTTPS /mcp and /search"| Space
+    Space --> Infer
+    Space --> Zilliz
+    Space --> Groq
+```
+
+
+---
+
