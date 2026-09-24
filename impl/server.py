@@ -28,7 +28,7 @@ import logging
 import os
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse
 
 from mcp_server import mcp_http_app
@@ -47,7 +47,17 @@ app = FastAPI(
         "/index-doc to add a single new document. MCP streamable HTTP is at /mcp."
     ),
     lifespan=mcp_http_app.lifespan,
+    # Behind Hugging Face, a slash redirect uses Location: http://... which
+    # Claude cannot follow. Keep /mcp and /mcp/ on the same HTTPS URL.
+    redirect_slashes=False,
 )
+
+
+@app.middleware("http")
+async def mcp_path_slash(request: Request, call_next):
+    if request.scope.get("path") == "/mcp":
+        request.scope["path"] = "/mcp/"
+    return await call_next(request)
 
 app.include_router(search.router)
 app.include_router(index_all.router)
