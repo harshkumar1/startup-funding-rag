@@ -1,0 +1,19 @@
+# Local check before Cloud Run: REST + remote MCP on http://127.0.0.1:8080
+#
+#   docker compose up --build
+#
+# MCP for Claude: http://127.0.0.1:8080/mcp
+#
+# Expects ../creds.config (repo-root creds.config). Override with:
+#   CREDS_CONFIG_HOST=/path/to/creds.config docker compose up --build
+services:
+  rag:
+    build: .
+    image: startup-funding-rag:local
+    ports:
+      - "8080:8080"
+    environment:
+      CREDS_CONFIG_PATH: /run/secrets/creds.config
+    volumes:
+      - ${CREDS_CONFIG_HOST:-../creds.config}:/run/secrets/creds.config:ro
+      - ./generation_config.json:/app/generation_config.json:ro

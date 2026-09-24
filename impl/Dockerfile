@@ -33,6 +33,7 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 COPY rag_api/ /app/rag_api/
 COPY rag_core/ /app/rag_core/
 COPY server.py /app/server.py
+COPY mcp_server.py /app/mcp_server.py
 # Default answer-generation tuning config (see generation_config.json +
 # AGENTS.md). Bind-mount your own file over this exact path at `docker run`
 # time to tune it live, without rebuilding this image.
