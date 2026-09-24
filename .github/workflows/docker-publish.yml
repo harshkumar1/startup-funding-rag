@@ -73,3 +73,19 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # Space is a thin FROM of this GHCR tag (not a copy of impl/). Requires
+      # repo secret HF_TOKEN with write access to the Space.
+      - name: Point Hugging Face Space at this image
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          SHORT_SHA: ${{ steps.vars.outputs.short_sha }}
+          SPACE_ID: harshkumar1/startup-funding-rag
+          IMAGE: ghcr.io/harshkumar1/startup-funding-rag
+        run: |
+          if [ -z "${HF_TOKEN}" ]; then
+            echo "Set repo secret HF_TOKEN (write access to the Space)."
+            exit 1
+          fi
+          pip install -q "huggingface_hub>=0.26.0"
+          python3 .github/scripts/point_hf_space.py
+
