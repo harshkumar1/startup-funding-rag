@@ -69,7 +69,6 @@ Locally: edit `impl/generation_config.json` and send another request.
 
 In GCP: <TBD>
 
-
 ## ------ Cursor Not Reviewed -------
 ### Not Yet Implemented
 

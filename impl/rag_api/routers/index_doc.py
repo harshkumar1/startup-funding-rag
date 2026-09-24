@@ -35,18 +35,6 @@ class IndexDocResponse(BaseModel):
 
 @router.post("/index-doc", response_model=IndexDocResponse)
 def index_doc(request: IndexDocRequest) -> IndexDocResponse:
-    """Add a single new document: commit it to the source GitHub repo
-    (harshkumar1/website-scrapper), then chunk -> embed -> insert it into
-    Zilliz without touching existing data.
-
-    Steps (TODO):
-      1. Commit `markdown_content` to
-         harshkumar1/website-scrapper:data/markdown/{document_id}.md via the
-         GitHub API, and append a row to data/raw_data.csv with the metadata
-         fields on this request.
-      2. Chunk the markdown content.
-      3. Embed each chunk and insert into the `rag_chunks` collection.
-    """
     return IndexDocResponse(
         status="not_implemented",
         detail=f"TODO: implement index_doc() for document_id={request.document_id!r}.",

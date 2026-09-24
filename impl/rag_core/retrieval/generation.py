@@ -1,39 +1,3 @@
-"""
-LLM-based answer generation — the RAG "generate" stage.
-
-Takes the user's question plus chunks already retrieved by
-`rag_core.retrieval.search.search_chunks` and produces a grounded
-natural-language answer via Groq (see AGENTS.md: Groq, llama-3.x family,
-not OpenAI/local).
-
-Answer-quality tuning knobs (system prompt, user prompt template, model,
-temperature, max_tokens, reasoning_format) intentionally do NOT live in this
-code or in env vars — they're read fresh from `generation_config.json` (see
-`_load_generation_config`) on every single call, with no in-process caching.
-That means editing the file (typically a bind-mounted override — see
-impl/README.MD) takes effect on the very next `/search` request, with no
-server restart or image rebuild needed. Only infra-level settings that
-aren't about answer *quality* (`GROQ_API_KEY`, concurrency/timeout bounds)
-stay in env vars via `common/config.py`, since those are ops knobs, not
-things you'd iterate on while tuning retrieval/generation quality.
-
-`generate_answer()` returns a `GenerationResult` bundling the answer
-together with the exact config + rendered prompt that produced it, rather
-than logging them separately here — the `/search` router serializes the
-whole thing into its response (and logs that single JSON blob), so
-everything about a generation call is visible in one place.
-
-Other patterns ported from sample/full_impl/{grok_retrieval_service.py,
-system_prompt.py,user_prompt.py}:
-- A context-only system prompt (answer strictly from the provided chunks).
-- Bounded LLM concurrency (`threading.BoundedSemaphore`) plus a wall-clock
-  generation timeout enforced via a short-lived `ThreadPoolExecutor`, rather
-  than letting a slow/hung generation call block a request indefinitely.
-- Never raises for LLM-side failures (missing config, timeout, API error,
-  empty completion) — always falls back to a usable message built from the
-  retrieved chunks so `/search` still returns something meaningful.
-"""
-
 from __future__ import annotations
 
 import json
@@ -56,9 +20,6 @@ logger = logging.getLogger(__name__)
 _CONFIG_FILENAME = "generation_config.json"
 _CONFIG_SEARCH_MAX_LEVELS = 6
 
-# Built-in fallback, used only if generation_config.json can't be found or
-# fails to parse — keeps /search answering (rather than hard-failing every
-# request) even with a missing file or one that's briefly malformed mid-edit.
 _DEFAULT_CONFIG = {
     "model": "llama-3.3-70b-versatile",
     "temperature": 0.2,
@@ -82,10 +43,6 @@ _semaphore: threading.BoundedSemaphore | None = None
 
 @dataclass(frozen=True)
 class GenerationResult:
-    """The answer plus the exact config + rendered prompt used to produce
-    it — bundled together so a caller (the `/search` router) can serialize
-    everything into one response/log entry instead of it being scattered."""
-
     answer: str
     model: str
     temperature: float
@@ -96,15 +53,6 @@ class GenerationResult:
 
 
 def _find_config_file() -> Path | None:
-    """Resolve `generation_config.json`, re-resolved on every call (not just
-    the contents) in case an operator moves/replaces it at runtime.
-
-    `GENERATION_CONFIG_PATH` wins if set (must point to an existing file).
-    Otherwise search upward from cwd, same pattern as
-    `common.config._find_creds_file` — this finds the default file baked
-    into the Docker image at `/app/generation_config.json` (WORKDIR), or a
-    bind-mounted override at that same path.
-    """
     explicit = os.getenv("GENERATION_CONFIG_PATH", "")
     if explicit:
         path = Path(explicit).expanduser()
@@ -124,8 +72,6 @@ def _find_config_file() -> Path | None:
 
 
 def _load_generation_config() -> dict:
-    """Read the generation-tuning config fresh from disk (see module
-    docstring — deliberately no caching) and merge it over `_DEFAULT_CONFIG`."""
     config = dict(_DEFAULT_CONFIG)
     path = _find_config_file()
     if path is None:
@@ -172,16 +118,10 @@ def _build_user_prompt(template: str, query: str, chunks: list[dict]) -> str:
         f"[{i + 1}] (source: {chunk.get('canonical_url') or 'unknown'})\n{chunk.get('text', '')}"
         for i, chunk in enumerate(chunks)
     )
-    # `Template.safe_substitute` (not an f-string/`.format()`) so literal
-    # `{`/`}` characters in scraped chunk text can never be misread as
-    # format placeholders or raise a KeyError/IndexError.
     return Template(template).safe_substitute(context=context_block, query=query)
 
 
 def _strip_think_block(text: str) -> str:
-    """Strip a leaked `<think>...</think>` block (belt-and-suspenders in case
-    a reasoning model is configured and `reasoning_format` doesn't hide it,
-    e.g. an older API version)."""
     cleaned = _THINK_BLOCK_RE.sub("", text).strip()
     if not cleaned and "<think>" in text:
         logger.warning(
@@ -202,19 +142,6 @@ def _fallback_answer(chunks: list[dict], reason: str) -> str:
 
 
 def generate_answer(query: str, chunks: list[dict]) -> GenerationResult:
-    """Generate a natural-language answer to `query`, grounded in `chunks`.
-
-    Args:
-        query: The user's original question.
-        chunks: Retrieved chunks (see `search_chunks`), each expected to
-            have at least a `text` field.
-
-    Returns:
-        A `GenerationResult` with the answer plus the exact model/temperature/
-        max_tokens/reasoning_format/system_prompt/user_prompt used to
-        produce it (see `_load_generation_config` for where those come
-        from) — never raises for LLM-side failures.
-    """
     gen_config = _load_generation_config()
 
     def _result(answer: str, user_prompt: str = "") -> GenerationResult:
@@ -271,7 +198,7 @@ def generate_answer(query: str, chunks: list[dict]) -> GenerationResult:
         )
     except RuntimeError as exc:
         return _result(_fallback_answer(chunks, str(exc)), user_prompt)
-    except Exception as exc:  # noqa: BLE001 — any Groq/API failure should degrade, not 500
+    except Exception as exc:
         logger.exception("Groq generation failed.")
         return _result(_fallback_answer(chunks, f"Groq call raised {exc!r}"), user_prompt)
     finally:

@@ -1,0 +1,26 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir torch --extra-index-url https://download.pytorch.org/whl/cpu
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy all files including static/ (index.html, app.js, style.css)
+COPY . .
+
+RUN chmod +x start.sh
+
+# Only expose FastAPI port (serves both API & HTML frontend)
+EXPOSE 8000
+
+ENV REDIS_HOST="localhost" \
+    REDIS_PORT="6380" \
+    MILVUS_HOST="localhost" \
+    MILVUS_PORT="19530"
+
+CMD ["./start.sh"]

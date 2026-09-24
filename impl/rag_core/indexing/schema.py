@@ -1,11 +1,3 @@
-"""
-`rag_chunks` collection schema + index management (Zilliz Cloud).
-
-Mirrors playground/schema_design/schema_design_notebook.ipynb sec 7 (schema)
-and sec 12 (AUTOINDEX + COSINE index). `text_vector` dim is passed in by the
-caller, read from the embedding model at runtime — never hardcoded.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -40,14 +32,6 @@ def _build_schema(vector_dim: int) -> MilvusClient:
 
 
 def recreate_collection(vector_dim: int) -> None:
-    """Drop the collection if it exists, then recreate it with a fresh schema.
-
-    WARNING: destructive — deletes all existing indexed data.
-
-    Args:
-        vector_dim: Embedding dimension for `text_vector`, read from the
-            embedding model at runtime (see embeddings.get_vector_dim).
-    """
     settings = load_settings()
     client = get_client()
 
@@ -65,18 +49,6 @@ def recreate_collection(vector_dim: int) -> None:
 
 
 def create_vector_index() -> None:
-    """Create the AUTOINDEX + COSINE index on `text_vector` (Zilliz Cloud
-    recommendation) if one doesn't already exist, then load the collection
-    into memory so it's immediately searchable.
-
-    Loading is done unconditionally (even when the index already existed)
-    since Zilliz Cloud (serverless/free tier) auto-releases idle collections
-    from memory to save resources — an existing index doesn't guarantee the
-    collection is currently loaded. `load_collection` is a cheap no-op if
-    it's already loaded. (`retrieval/search.py` also self-heals by loading
-    on-demand if a search hits a "not loaded" error later, e.g. after a long
-    idle period post-indexing.)
-    """
     settings = load_settings()
     client = get_client()
 

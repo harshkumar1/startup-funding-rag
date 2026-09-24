@@ -1,0 +1,35 @@
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Install system utilities
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements file first
+COPY requirements.txt .
+
+# Pre-install CPU-only PyTorch using --extra-index-url to avoid downloading CUDA binaries
+RUN pip install --no-cache-dir torch --extra-index-url https://download.pytorch.org/whl/cpu
+
+# Install remaining application requirements (including mcp, fastapi, uvicorn, etc.)
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application source code
+COPY . .
+
+# Set permissions for execution script
+RUN chmod +x start.sh
+
+# Expose ports: 8000 (FastAPI REST), 8001 (MCP SSE Server), 7860 (Streamlit UI)
+EXPOSE 8000 8001 7860
+
+# Default Environment Variables
+ENV REDIS_HOST="localhost" \
+    REDIS_PORT="6380" \
+    MILVUS_HOST="localhost" \
+    MILVUS_PORT="19530" \
+    MCP_PORT="8001"
+
+CMD ["./start.sh"]
