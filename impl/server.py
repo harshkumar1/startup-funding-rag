@@ -34,12 +34,6 @@ from fastapi import FastAPI
 
 from rag_api.routers import index_all, index_doc, search
 
-# Configured before anything else logs — rag_core's per-stage/per-batch
-# progress logging (indexer.py, embeddings.py, source_repo.py, schema.py)
-# relies on the root logger having a handler, otherwise those calls are
-# silently dropped. uvicorn's own dictConfig (set up inside uvicorn.run(),
-# below) only touches its own "uvicorn"/"uvicorn.access"/"uvicorn.error"
-# loggers and leaves `disable_existing_loggers=False`, so this still applies.
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -61,7 +55,6 @@ app.include_router(index_doc.router)
 
 def main() -> None:
     host = os.getenv("API_HOST", "0.0.0.0")
-    # Cloud Run injects PORT; fall back to API_PORT, then 8080 for local dev.
     port = int(os.getenv("PORT") or os.getenv("API_PORT", "8080"))
     uvicorn.run(app, host=host, port=port)
 

@@ -1,10 +1,3 @@
-"""
-Vector search over the `rag_chunks` collection (Zilliz Cloud).
-
-Schema / index reference: playground/schema_design/schema_design_notebook.ipynb
-(AUTOINDEX + COSINE on `text_vector`).
-"""
-
 from __future__ import annotations
 
 import logging
@@ -13,7 +6,9 @@ from pymilvus import MilvusClient
 from pymilvus.exceptions import MilvusException
 
 from ..common.config import load_settings
+from ..common.embeddings import embed_text
 from ..common.vector_store import get_client
+from .rerank import rerank_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -43,13 +38,6 @@ def _run_search(
 
 
 def search_chunks(query_vector: list[float], top_k: int) -> list[dict]:
-    """Search the configured collection for the chunks nearest to `query_vector`.
-
-    Args:
-        query_vector: Embedding of the search text (must match the
-            collection's `text_vector` dimension).
-        top_k: Maximum number of chunks to return.
-    """
     settings = load_settings()
     client = get_client()
 
@@ -58,11 +46,6 @@ def search_chunks(query_vector: list[float], top_k: int) -> list[dict]:
     except MilvusException as exc:
         if "not loaded" not in str(exc).lower():
             raise
-        # Zilliz Cloud (serverless/free tier) auto-releases idle collections
-        # from memory to save resources, so a collection indexed a while ago
-        # can come back "not loaded" on the next search with no action on
-        # our end. Load it back in and retry once instead of failing the
-        # request.
         logger.warning(
             "Collection %r not loaded (likely auto-released after "
             "inactivity by Zilliz); loading and retrying search once.",
@@ -73,3 +56,35 @@ def search_chunks(query_vector: list[float], top_k: int) -> list[dict]:
 
     hits = results[0] if results else []
     return [{"score": hit["distance"], **hit["entity"]} for hit in hits]
+
+
+def retrieve_chunks(query: str, top_k: int) -> list[dict]:
+    """
+    Embed, vector-search a wider candidate set, then rerank down to top_k.
+
+    Same pattern as sample/grok_retrieval_service.py: fetch cfg.top_k (8)
+    hits, then keep rerank_top_n. Here the API `top_k` is the count after
+    rerank; candidate width comes from RERANK_CANDIDATES (default 8).
+    Rerank failures fall back to the original vector order (sample behavior).
+    """
+    settings = load_settings()
+    vector = embed_text(query)
+    candidate_k = top_k
+    if settings.rerank:
+        candidate_k = max(settings.rerank_candidates, top_k)
+
+    chunks = search_chunks(vector, top_k=candidate_k)
+    if not settings.rerank or not chunks:
+        return chunks[:top_k]
+
+    before_ids = [chunk.get("chunk_id") for chunk in chunks]
+    logger.info("Rerank BEFORE (vector order, %d hits): %s", len(chunks), before_ids)
+    try:
+        reranked = rerank_chunks(query, chunks, top_n=top_k)
+    except Exception:
+        logger.exception("Reranking failed, using original vector hits")
+        return chunks[:top_k]
+
+    after_ids = [chunk.get("chunk_id") for chunk in reranked]
+    logger.info("Rerank AFTER (cross-encoder order, %d hits): %s", len(reranked), after_ids)
+    return reranked

@@ -1,20 +1,3 @@
-"""
-Fetch source documents (markdown + metadata) for the scraped website content
-repo (see AGENTS.md: harshkumar1/website-scrapper).
-
-Mirrors the load logic in
-playground/chunking/chunking_experiments_simple.ipynb (secs 3-4): list every
-file under `data/markdown`, join each to its row in `data/raw_data.csv` by
-`doc_id` (= filename without `.md`).
-
-Two source modes, both producing the same `SourceDocument` shape:
-  - GitHub (default): fetches over the GitHub REST API + raw content CDN
-    (no `git` binary required in the container) — used in deployed envs.
-  - Local (`SOURCE_LOCAL_DIR` set): reads directly from a local checkout of
-    the same repo — handy for local runs against uncommitted/local edits
-    without hitting the network or GitHub rate limits.
-"""
-
 from __future__ import annotations
 
 import csv
@@ -33,8 +16,6 @@ logger = logging.getLogger(__name__)
 _USER_AGENT = "startup-funding-rag-ingest"
 _MAX_WORKERS = 8
 _REQUEST_TIMEOUT_S = 20
-# How often to log fetch progress (every Nth file), to avoid one log line per
-# file for large corpora while still showing this is making progress.
 _FETCH_LOG_INTERVAL = 10
 
 
@@ -140,12 +121,6 @@ def _load_local_documents(settings: Settings) -> list[SourceDocument]:
 
 
 def load_all_documents() -> list[SourceDocument]:
-    """Fetch every markdown doc + its CSV metadata row from the source repo
-    (local checkout if `SOURCE_LOCAL_DIR` is set, otherwise GitHub).
-
-    Docs with no matching `raw_data.csv` row are skipped (mirrors the
-    notebook's `missing` warning) rather than failing the whole ingest.
-    """
     settings = load_settings()
     if settings.source_local_dir:
         return _load_local_documents(settings)

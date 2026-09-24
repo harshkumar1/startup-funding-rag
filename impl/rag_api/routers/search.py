@@ -1,6 +1,3 @@
-"""POST /search — retrieve relevant chunks and (optionally) generate an
-answer for a question (implemented)."""
-
 from __future__ import annotations
 
 import logging
@@ -8,9 +5,8 @@ import logging
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from rag_core.common.embeddings import embed_text
 from rag_core.retrieval.generation import generate_answer
-from rag_core.retrieval.search import search_chunks
+from rag_core.retrieval.search import retrieve_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +15,13 @@ router = APIRouter()
 
 class SearchRequest(BaseModel):
     query: str = Field(..., description="User question / search text.")
-    top_k: int = Field(5, description="Number of chunks to return.")
+    top_k: int = Field(
+        5,
+        description=(
+            "Number of chunks to return after rerank. Vector search fetches "
+            "max(RERANK_CANDIDATES, top_k) first (default 8)."
+        ),
+    )
     generate_answer: bool = Field(
         True,
         description=(
@@ -31,10 +33,6 @@ class SearchRequest(BaseModel):
 
 
 class GenerationInfo(BaseModel):
-    """The exact generation config + rendered prompt behind `answer` —
-    included in the response itself (not just the logs) so the model,
-    temperature, max_tokens, reasoning_format, system prompt, and rendered
-    user prompt are all visible together in one place."""
 
     model: str
     temperature: float
@@ -62,17 +60,7 @@ class SearchResponse(BaseModel):
 
 @router.post("/search", response_model=SearchResponse)
 def search(request: SearchRequest) -> SearchResponse:
-    """Retrieve the most relevant chunks for a natural-language query, then
-    (by default) generate an answer grounded in those chunks.
-
-    Embeds the query with the same model used to build the collection, runs
-    a vector search against Zilliz Cloud for the nearest chunks, and — unless
-    `generate_answer` is false — passes them to Groq
-    (`rag_core.retrieval.generation.generate_answer`) to produce a final
-    natural-language answer.
-    """
-    vector = embed_text(request.query)
-    chunks = search_chunks(vector, top_k=request.top_k)
+    chunks = retrieve_chunks(request.query, top_k=request.top_k)
 
     answer = None
     generation_info = None
@@ -96,9 +84,5 @@ def search(request: SearchRequest) -> SearchResponse:
         generation=generation_info,
     )
 
-    # Logged unconditionally (retrieval-only calls included) so the full
-    # response — chunks, answer, and the exact generation config/prompt that
-    # produced it — is always visible together in the logs, not just in the
-    # HTTP response body.
     logger.info("Search response:\n%s", response.model_dump_json(indent=2))
     return response

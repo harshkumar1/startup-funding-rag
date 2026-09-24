@@ -1,20 +1,3 @@
-"""
-Settings for retrieval / ingestion business logic (Zilliz + embedding model).
-
-Populated once from environment variables via `load_settings()`. Deliberately
-separate from server bootstrap config (API_HOST/PORT in server.py) so the
-server can still start and deploy before ZILLIZ_* secrets are configured;
-`load_settings()` is only called lazily, when an endpoint actually needs the
-vector store or embedding model.
-
-Local-dev convenience: if a `creds.config` file is found (see
-`_find_creds_file`), its values are loaded into `os.environ` *before* the
-env vars below are read — but only to fill in gaps, never overriding an
-already-set env var. This keeps deployment (Cloud Run/GKE env vars / Secret
-Manager) as the source of truth and requires zero code change once
-`impl/` is split into its own repo (the file simply won't be found).
-"""
-
 from __future__ import annotations
 
 import os
@@ -25,7 +8,6 @@ from pathlib import Path
 _CREDS_FILENAME = "creds.config"
 _CREDS_SEARCH_MAX_LEVELS = 6
 
-# creds.config key -> env var it fills in (only if that env var isn't already set).
 _CREDS_FILE_KEY_MAP = {
     "ZILLIZ_URI": "ZILLIZ_URI",
     "User": "ZILLIZ_USER",
@@ -38,13 +20,6 @@ _CREDS_LINE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*[:=]\s*(.*)$")
 
 
 def _find_creds_file() -> Path | None:
-    """Return the creds file to use, or None if not configured/found.
-
-    `CREDS_CONFIG_PATH` wins if set (must point to an existing file).
-    Otherwise, search upward from the current working directory for a file
-    named `creds.config` (handles running from `impl/` or the repo
-    root), giving up after a few levels.
-    """
     explicit = os.getenv("CREDS_CONFIG_PATH", "")
     if explicit:
         path = Path(explicit).expanduser()
@@ -71,7 +46,6 @@ def _strip_quotes(value: str) -> str:
 
 
 def _read_creds_file(path: Path) -> dict[str, str]:
-    """Parse a simple `KEY: value` / `KEY = value` per-line credentials file."""
     values: dict[str, str] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
@@ -84,7 +58,6 @@ def _read_creds_file(path: Path) -> dict[str, str]:
 
 
 def _apply_creds_file() -> None:
-    """Fill in any unset mapped env vars from the creds file, if one is found."""
     path = _find_creds_file()
     if path is None:
         return
@@ -110,6 +83,9 @@ class Settings:
     groq_api_key: str
     generation_timeout_seconds: int
     max_concurrent_generations: int
+    rerank: bool
+    rerank_model: str
+    rerank_candidates: int
 
 
 def load_settings() -> Settings:
@@ -141,29 +117,18 @@ def load_settings() -> Settings:
             "EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
         ),
         hf_token=hf_token,
-        # Public source-of-truth repo for scraped docs (see AGENTS.md). Not a
-        # secret — overridable in case the source repo ever moves.
         source_repo=os.getenv("GITHUB_SOURCE_REPO", "harshkumar1/website-scrapper"),
         source_branch=os.getenv("GITHUB_SOURCE_BRANCH", "main"),
         source_docs_subdir=os.getenv("GITHUB_SOURCE_DOCS_SUBDIR", "data/markdown"),
         source_csv_path=os.getenv("GITHUB_SOURCE_CSV_PATH", "data/raw_data.csv"),
-        # If set, /index-all reads from this local checkout of the source
-        # repo (source_docs_subdir / source_csv_path resolved under it)
-        # instead of fetching from GitHub. Local dev only.
         source_local_dir=os.getenv("SOURCE_LOCAL_DIR", ""),
-        # Groq (RAG "generate" stage — rag_core/retrieval/generation.py). Not
-        # validated here (unlike zilliz_uri/hf_token above) since only /search
-        # with generate_answer=true needs it — /index-all and a
-        # retrieval-only /search must still work without it configured;
-        # generation.py raises its own clear error if used while unset.
-        #
-        # Answer-quality knobs (model, temperature, max_tokens,
-        # reasoning_format, system/user prompts) deliberately are NOT here —
-        # env vars require a container restart to change. They live in
-        # generation_config.json instead, re-read from disk on every
-        # generate_answer() call, so tuning them doesn't need a restart or
-        # rebuild. Only true ops/infra knobs stay as env vars below.
         groq_api_key=os.getenv("GROQ_API_KEY", ""),
         generation_timeout_seconds=int(os.getenv("GENERATION_TIMEOUT_SECONDS", "30")),
         max_concurrent_generations=int(os.getenv("MAX_CONCURRENT_GENERATIONS", "4")),
+        # Same defaults as sample/retrieval_config.py (top_k / rerank / rerank_model).
+        rerank=os.getenv("RERANK", "true").strip().lower() in ("1", "true", "yes"),
+        rerank_model=os.getenv(
+            "RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2"
+        ),
+        rerank_candidates=int(os.getenv("RERANK_CANDIDATES", "8")),
     )
