@@ -73,19 +73,3 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # GITHUB_TOKEN in this job already has packages:write (it pushed the
-      # image). Local `gh` often lacks read:packages, so visibility is set
-      # here rather than from a laptop.
-      - name: Make GHCR package public
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          OWNER="${{ github.repository_owner }}"
-          PKG="startup-funding-rag"
-          gh api --method PUT \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "/users/${OWNER}/packages/container/${PKG}/visibility" \
-            -f visibility=public
-
