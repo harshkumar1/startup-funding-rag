@@ -77,37 +77,36 @@ Happy path: embed the question → search Zilliz → rerank → Groq answer from
 sequenceDiagram
     autonumber
     actor Client
-    participant API as FastAPI
-    participant Search as search.py
-    participant HF as Hugging Face
-    participant Zilliz as Zilliz
+    participant API as search API
+    participant HF as Hugging Face MiniLM
+    participant Zilliz as Zilliz rag_chunks
     participant Rerank as rerank.py
+    participant HFRerank as Hugging Face rerank model
     participant Groq as Groq
 
     Client->>API: POST /search {query, top_k}
-    API->>Search: run_search()
-    Search->>HF: embed query
-    HF-->>Search: query vector
-    Search->>Zilliz: similarity search
-    Zilliz-->>Search: candidate chunks
-    Search->>Rerank: rerank query + chunk text
-    Rerank-->>Search: top_k chunks
-    Search->>Groq: generate answer
-    Groq-->>Search: answer
-    Search-->>API: results + answer + generation
-    API-->>Client: JSON
+    API->>HF: embed question (sentence-transformers/all-MiniLM-L6-v2, inputs=question)
+    HF-->>API: embedding of the query
+    API->>Zilliz: similarity search (limit=8, is_active=true)
+    Zilliz-->>API: chunk text + scraping metadata
+    API->>Rerank: rerank_chunks(query, retrieved chunks, top_n=2)
+    loop each retrieved chunk
+        Rerank->>HFRerank: (query, chunk.text) (cross-encoder/ms-marco-MiniLM-L-6-v2)
+        HFRerank-->>Rerank: rerank_score
+    end
+    Rerank->>Rerank: sort by rerank_score, keep 2
+    Rerank-->>API: top-2 chunks post re-ranking
+    API->>Groq: generate answer (openai/gpt-oss-20b, temperature=0.2, max_tokens=1024, system + user)
+    Groq-->>API: answer
+    API-->>Client: Response JSON
 ```
 
 **What this implements**
 
-- Query embed uses the same MiniLM HTTP call as index (not a second model).
-- Zilliz fetch width is `max(RERANK_CANDIDATES, top_k)` (defaults 8 and 5) so rerank has extra candidates when `top_k` is small. Filter: `is_active == true`.
-- Rerank is a local `CrossEncoder` on `(query, chunk.text)` pairs. It sets `score` to the rerank score and keeps the first `top_k`.
-- Groq gets `generation_config.json` system prompt plus a user prompt of `$context` (reranked chunks + URLs) and `$query`. Response includes `results`, `answer`, and `generation` (prompts + model knobs).
-
-`top_k`: 5. Chunks after rerank (also sent to the LLM).
-
-`RERANK_CANDIDATES`: 8. Vector-search width before rerank.
+- Same MiniLM as index. Return is the **embedding of the query**, used only to search Zilliz.
+- Same two knobs as sample: vector search **8** hits (`RERANK_CANDIDATES` = sample `top_k`). Rerank keeps **2** (`top_k` request default = sample `rerank_top_n`). No `max(8, request top_k)`.
+- **Scraping metadata on search:** Zilliz rows are what you stored at index-all (text + url, scheme, language, `is_active`, …). `is_active == true` is the **filter** so inactive pages are not retrieved. The rest is **not** used to score. It comes back on each hit and is copied into Response JSON `results[]` and into the Groq user prompt (source URL + text).
+- **Rerank:** search calls `rerank.py`; that module calls the Hugging Face Hub model `cross-encoder/ms-marco-MiniLM-L-6-v2` (same as sample). For each hit: `(query, chunk.text)` → `rerank_score`; keep Zilliz distance as `vector_score`; `score = rerank_score`. Then sort by `rerank_score` and keep 2. The model runs in-process (sample does too), not the HF Inference API.
 
 `temperature`: 0.2. `max_tokens`: 1024.
 
@@ -203,7 +202,7 @@ Walk the boxes left to right:
 
 1. **Index time vs query time.** Chunking only in `indexer.py`. A question is one `embed_text` in `retrieve_chunks`.
 2. **Same embedding space.** Ingest `embed_texts` and query `embed_text` both hit MiniLM on HF Inference.
-3. **Recall then precision.** Milvus ~8 (`RERANK_CANDIDATES`) then cross-encoder down to `top_k`.
+3. **Recall then precision.** Milvus 8 (`RERANK_CANDIDATES`) then cross-encoder down to 2 (`rerank_top_n`).
 4. **Grounded generation.** Groq prompt is only retrieved chunks + URLs from `generation_config.json`; failures → excerpts.
 5. **Not implemented.** `POST /index-doc` is `not_implemented`. No eval API. MCP does not wrap `/index-doc`.
 

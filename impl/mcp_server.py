@@ -17,7 +17,7 @@ mcp = FastMCP("startup-funding-rag")
 
 
 @mcp.tool
-def search(query: str, top_k: int = 5) -> dict:
+def search(query: str, top_k: int = 2) -> dict:
     """Search the startup-funding knowledge base and generate a grounded answer.
 
     Same JSON as POST /search with generate_answer=true. Always reranks.

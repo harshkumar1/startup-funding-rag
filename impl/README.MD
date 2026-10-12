@@ -53,6 +53,8 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS). 
 
 Restart Claude Desktop. You should see tools `search` and `index_all`. Ask something about the knowledge base; if that works, deploy the same image.
 
+TODO: MCP `search` `top_k` is **not** 8. Vector search always fetches 8 (`RERANK_CANDIDATES`). MCP `top_k` default is **2** (chunks kept after rerank, sample `rerank_top_n`). Claude can override `top_k`. Decide whether MCP should hide `top_k` and always keep 2, or always keep 8 (all vector hits).
+
 ### Claude Code
 
 Project `.mcp.json` or user config:

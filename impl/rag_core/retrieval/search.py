@@ -62,18 +62,14 @@ def retrieve_chunks(query: str, top_k: int, rerank: bool | None = None) -> list[
     """
     Embed, vector-search a wider candidate set, then rerank down to top_k.
 
-    Same pattern as sample/grok_retrieval_service.py: fetch cfg.top_k (8)
-    hits, then keep rerank_top_n. Here the API `top_k` is the count after
-    rerank; candidate width comes from RERANK_CANDIDATES (default 8).
-    Rerank failures fall back to the original vector order (sample behavior).
-    `rerank=None` uses settings.rerank; MCP passes True so it always reranks.
+    Same as sample/retrieval_config.py + grok_retrieval_service.py:
+    similarity_top_k = cfg.top_k (8), then keep rerank_top_n (2).
+    Here RERANK_CANDIDATES is that 8; API/MCP top_k is rerank_top_n.
     """
     settings = load_settings()
     do_rerank = settings.rerank if rerank is None else rerank
     vector = embed_text(query)
-    candidate_k = top_k
-    if do_rerank:
-        candidate_k = max(settings.rerank_candidates, top_k)
+    candidate_k = settings.rerank_candidates if do_rerank else top_k
 
     chunks = search_chunks(vector, top_k=candidate_k)
     if not do_rerank or not chunks:

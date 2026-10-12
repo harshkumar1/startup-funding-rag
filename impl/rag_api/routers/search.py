@@ -16,10 +16,10 @@ router = APIRouter()
 class SearchRequest(BaseModel):
     query: str = Field(..., description="User question / search text.")
     top_k: int = Field(
-        5,
+        2,
         description=(
-            "Number of chunks to return after rerank. Vector search fetches "
-            "max(RERANK_CANDIDATES, top_k) first (default 8)."
+            "Chunks kept after rerank (sample rerank_top_n). Vector search "
+            "always fetches RERANK_CANDIDATES first (default 8, sample top_k)."
         ),
     )
     generate_answer: bool = Field(
