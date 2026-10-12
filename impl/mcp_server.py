@@ -21,8 +21,6 @@ def search(query: str, top_k: int = 2) -> dict:
     """Search the startup-funding knowledge base and generate a grounded answer.
 
     Same JSON as POST /search with generate_answer=true. Always reranks.
-    The tool result includes `latency` (milliseconds). Always end your
-    user-facing reply with a line: Latency: {latency} ms.
     """
     try:
         response: SearchResponse = run_search(
