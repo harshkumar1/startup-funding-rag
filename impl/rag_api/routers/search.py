@@ -46,16 +46,8 @@ class GenerationInfo(BaseModel):
 class SearchResponse(BaseModel):
     query: str
     top_k: int
-    results: list[dict]
     answer: str | None = Field(
         None, description="Generated answer, or null if generate_answer was false."
-    )
-    generation: GenerationInfo | None = Field(
-        None,
-        description=(
-            "Generation config + rendered prompt used to produce `answer`, "
-            "or null if generate_answer was false."
-        ),
     )
     latency: int = Field(
         ...,
@@ -63,6 +55,14 @@ class SearchResponse(BaseModel):
             "Wall-clock milliseconds from the start of search through "
             "retrieval, rerank, and (when enabled) Groq generation. "
             "Same idea as sample QueryResponse.latency."
+        ),
+    )
+    results: list[dict]
+    generation: GenerationInfo | None = Field(
+        None,
+        description=(
+            "Generation config + rendered prompt used to produce `answer`, "
+            "or null if generate_answer was false."
         ),
     )
 
@@ -88,10 +88,10 @@ def run_search(request: SearchRequest, *, rerank: bool | None = None) -> SearchR
     response = SearchResponse(
         query=request.query,
         top_k=request.top_k,
-        results=chunks,
         answer=answer,
-        generation=generation_info,
         latency=int((time.time() - t0) * 1000),
+        results=chunks,
+        generation=generation_info,
     )
 
     logger.info("Search response:\n%s", response.model_dump_json(indent=2))
