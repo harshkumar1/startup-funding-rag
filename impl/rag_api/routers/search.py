@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
@@ -40,6 +41,7 @@ class GenerationInfo(BaseModel):
     reasoning_format: str
     system_prompt: str
     user_prompt: str
+    latency: int
 
 
 class SearchResponse(BaseModel):
@@ -59,6 +61,7 @@ class SearchResponse(BaseModel):
 
 
 def run_search(request: SearchRequest, *, rerank: bool | None = None) -> SearchResponse:
+    t0 = time.time()
     chunks = retrieve_chunks(request.query, top_k=request.top_k, rerank=rerank)
 
     answer = None
@@ -73,6 +76,7 @@ def run_search(request: SearchRequest, *, rerank: bool | None = None) -> SearchR
             reasoning_format=result.reasoning_format,
             system_prompt=result.system_prompt,
             user_prompt=result.user_prompt,
+            latency=int((time.time() - t0) * 1000),
         )
 
     response = SearchResponse(
