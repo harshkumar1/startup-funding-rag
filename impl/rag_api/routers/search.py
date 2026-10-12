@@ -85,15 +85,11 @@ def run_search(request: SearchRequest, *, rerank: bool | None = None) -> SearchR
             user_prompt=result.user_prompt,
         )
 
-    latency_ms = int((time.time() - t0) * 1000)
-    if answer:
-        answer = f"{answer.rstrip()}\n\nLatency: {latency_ms} ms"
-
     response = SearchResponse(
         query=request.query,
         top_k=request.top_k,
         answer=answer,
-        latency=latency_ms,
+        latency=int((time.time() - t0) * 1000),
         results=chunks,
         generation=generation_info,
     )

@@ -108,8 +108,6 @@ sequenceDiagram
 - **Scraping metadata on search:** Zilliz rows are what you stored at index-all (text + url, scheme, language, `is_active`, …). `is_active == true` is the **filter** so inactive pages are not retrieved. The rest is **not** used to score. It comes back on each hit and is copied into Response JSON `results[]` and into the Groq user prompt (source URL + text).
 - **Rerank:** search calls `rerank.py`; that module calls the Hugging Face Hub model `cross-encoder/ms-marco-MiniLM-L-6-v2` (same as sample). For each hit: `(query, chunk.text)` → `rerank_score`; keep Zilliz distance as `vector_score`; `score = rerank_score`. Then sort by `rerank_score` and keep 2. The model runs in-process (sample does too), not the HF Inference API.
 
-Response JSON includes `latency` (ms) from receiving the query through Groq’s answer (embed + Zilliz + rerank + LLM). The same number is appended to `answer` as `Latency: N ms`. Not stored on each chunk in `results`. MCP `search` returns the same fields.
-
 `temperature`: 0.2. `max_tokens`: 1024.
 
 ---
