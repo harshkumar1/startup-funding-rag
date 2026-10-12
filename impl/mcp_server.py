@@ -11,21 +11,25 @@ from fastapi import HTTPException
 from fastmcp import FastMCP
 
 from rag_api.routers.index_all import index_all as index_all_http
-from rag_api.routers.search import SearchRequest, search as search_http
+from rag_api.routers.search import SearchRequest, SearchResponse, run_search
 
 mcp = FastMCP("startup-funding-rag")
 
 
 @mcp.tool
-def search(query: str, top_k: int = 5, generate_answer: bool = True) -> dict:
-    """Search the startup-funding knowledge base and optionally generate a grounded answer.
+def search(query: str, top_k: int = 5) -> dict:
+    """Search the startup-funding knowledge base and generate a grounded answer.
 
-    Same behavior as POST /search.
+    Same JSON as POST /search with generate_answer=true. Always reranks.
     """
-    response = search_http(
-        SearchRequest(query=query, top_k=top_k, generate_answer=generate_answer)
-    )
-    return response.model_dump()
+    try:
+        response: SearchResponse = run_search(
+            SearchRequest(query=query, top_k=top_k, generate_answer=True),
+            rerank=True,
+        )
+        return response.model_dump(mode="json")
+    except HTTPException as exc:
+        return {"status": "error", "detail": exc.detail}
 
 
 @mcp.tool
@@ -35,7 +39,7 @@ def index_all() -> dict:
     Same behavior as POST /index-all. Destructive.
     """
     try:
-        return index_all_http().model_dump()
+        return index_all_http().model_dump(mode="json")
     except HTTPException as exc:
         return {"status": "error", "detail": exc.detail}
 

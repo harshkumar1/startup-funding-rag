@@ -28,7 +28,11 @@ ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
     GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/certs/ca-certificates.crt
 
 COPY requirements.txt /app/requirements.txt
-RUN pip install --upgrade pip && pip install -r requirements.txt
+# CPU torch first (same as sample/Dockerfile-mcp) so sentence-transformers
+# can run the sample cross-encoder locally. hf-inference does not host it.
+RUN pip install --upgrade pip \
+    && pip install --no-cache-dir torch --extra-index-url https://download.pytorch.org/whl/cpu \
+    && pip install -r requirements.txt
 
 COPY rag_api/ /app/rag_api/
 COPY rag_core/ /app/rag_core/

@@ -173,7 +173,8 @@ that haven't been ported over here yet.
 - **Reranking** — `sample/full_impl/index_loader.py` wires in a
   `SentenceTransformerRerank` postprocessor: fetch a wider top-k of vector
   hits, then rerank down to a smaller top-n before use. `retrieval/search.py`
-  returns raw vector-similarity order with no reranking step.
+  does the same with a local `CrossEncoder` (sample model). MCP search always
+  reranks; `POST /search` follows `RERANK` (default true).
 - **Multi-turn conversation support** — `sample/full_impl/user_prompt.py`
   threads a `history: list[(role, msg)]` into the prompt template. `/search`
   is single-turn/stateless; each request is answered with no memory of

@@ -58,9 +58,8 @@ class SearchResponse(BaseModel):
     )
 
 
-@router.post("/search", response_model=SearchResponse)
-def search(request: SearchRequest) -> SearchResponse:
-    chunks = retrieve_chunks(request.query, top_k=request.top_k)
+def run_search(request: SearchRequest, *, rerank: bool | None = None) -> SearchResponse:
+    chunks = retrieve_chunks(request.query, top_k=request.top_k, rerank=rerank)
 
     answer = None
     generation_info = None
@@ -86,3 +85,8 @@ def search(request: SearchRequest) -> SearchResponse:
 
     logger.info("Search response:\n%s", response.model_dump_json(indent=2))
     return response
+
+
+@router.post("/search", response_model=SearchResponse)
+def search(request: SearchRequest) -> SearchResponse:
+    return run_search(request)

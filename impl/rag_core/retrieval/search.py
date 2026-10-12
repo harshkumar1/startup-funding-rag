@@ -58,7 +58,7 @@ def search_chunks(query_vector: list[float], top_k: int) -> list[dict]:
     return [{"score": hit["distance"], **hit["entity"]} for hit in hits]
 
 
-def retrieve_chunks(query: str, top_k: int) -> list[dict]:
+def retrieve_chunks(query: str, top_k: int, rerank: bool | None = None) -> list[dict]:
     """
     Embed, vector-search a wider candidate set, then rerank down to top_k.
 
@@ -66,15 +66,17 @@ def retrieve_chunks(query: str, top_k: int) -> list[dict]:
     hits, then keep rerank_top_n. Here the API `top_k` is the count after
     rerank; candidate width comes from RERANK_CANDIDATES (default 8).
     Rerank failures fall back to the original vector order (sample behavior).
+    `rerank=None` uses settings.rerank; MCP passes True so it always reranks.
     """
     settings = load_settings()
+    do_rerank = settings.rerank if rerank is None else rerank
     vector = embed_text(query)
     candidate_k = top_k
-    if settings.rerank:
+    if do_rerank:
         candidate_k = max(settings.rerank_candidates, top_k)
 
     chunks = search_chunks(vector, top_k=candidate_k)
-    if not settings.rerank or not chunks:
+    if not do_rerank or not chunks:
         return chunks[:top_k]
 
     before_ids = [chunk.get("chunk_id") for chunk in chunks]
