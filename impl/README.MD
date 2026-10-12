@@ -11,22 +11,95 @@ docker build -t startup-funding-rag .
 docker build -t startup-funding-rag:$(git rev-parse --short=7 HEAD) -t startup-funding-rag:latest .
 ```
 
-## Docker Run
+## Hosted MCP (Hugging Face Space)
+
+- MCP: https://harshkumar1-startup-funding-rag.hf.space/mcp
+- API docs: https://harshkumar1-startup-funding-rag.hf.space/docs
+
+Claude.ai / Claude on phone: Settings → Connectors → add the MCP URL. Claude Desktop can use the same URL with `mcp-remote` instead of localhost.
+
+## Local Docker (REST + MCP, check in Claude before deploy)
+
+From `impl/`, with `creds.config` at the repo root:
+
 ```bash
-docker run --rm -p 8080:8080 -e ZILLIZ_URI="" -e ZILLIZ_USER="" -e ZILLIZ_PASSWORD="" -e HF_TOKEN="" -e GROQ_API_KEY="" startup-funding-rag
+docker compose up --build
 ```
+
+Leave this running. REST is `http://127.0.0.1:8080`. MCP is `http://127.0.0.1:8080/mcp`.
+
+Sanity-check the API first:
+
+```bash
+curl -sS -X POST http://127.0.0.1:8080/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What is T-Fund?", "top_k": 3}' | jq .
+```
+
+### Claude Desktop
+
+Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS). Claude Desktop talks to local HTTP MCP through `mcp-remote`:
+
+```json
+{
+  "mcpServers": {
+    "startup-funding-rag": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "http://127.0.0.1:8080/mcp"]
+    }
+  }
+}
+```
+
+Restart Claude Desktop. You should see tools `search` and `index_all`. Ask something about the knowledge base; if that works, deploy the same image.
+
+### Claude Code
+
+Project `.mcp.json` or user config:
+
+```json
+{
+  "mcpServers": {
+    "startup-funding-rag": {
+      "type": "http",
+      "url": "http://127.0.0.1:8080/mcp"
+    }
+  }
+}
+```
+
+Equivalent `docker run` (same ports and mounts as compose):
 
 ```bash
 docker run --rm -p 8080:8080 \
   -v "/Users/hkumar14/git@harsh/rag/creds.config:/run/secrets/creds.config:ro" \
   -e CREDS_CONFIG_PATH=/run/secrets/creds.config \
   -v "/Users/hkumar14/git@harsh/rag/impl/generation_config.json:/app/generation_config.json:ro" \
-  startup-funding-rag
+  startup-funding-rag:local
 ```
 
-## Starting Python Server
+After Cloud Run, switch the URL to `https://<service-url>/mcp` (Claude Code `type: http`, or Desktop `mcp-remote` with that HTTPS URL).
+
+## Starting Python Server (no Docker)
 ```bash
 python server.py
+```
+
+Local stdio MCP (no Docker HTTP), from `impl/`:
+
+```bash
+python mcp_server.py
+```
+
+```json
+{
+  "mcpServers": {
+    "startup-funding-rag": {
+      "command": "python",
+      "args": ["/absolute/path/to/impl/mcp_server.py"]
+    }
+  }
+}
 ```
 
 ## Trigger indexing:
@@ -100,7 +173,8 @@ that haven't been ported over here yet.
 - **Reranking** — `sample/full_impl/index_loader.py` wires in a
   `SentenceTransformerRerank` postprocessor: fetch a wider top-k of vector
   hits, then rerank down to a smaller top-n before use. `retrieval/search.py`
-  returns raw vector-similarity order with no reranking step.
+  does the same with a local `CrossEncoder` (sample model). MCP search always
+  reranks; `POST /search` follows `RERANK` (default true).
 - **Multi-turn conversation support** — `sample/full_impl/user_prompt.py`
   threads a `history: list[(role, msg)]` into the prompt template. `/search`
   is single-turn/stateless; each request is answered with no memory of

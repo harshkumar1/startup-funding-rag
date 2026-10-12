@@ -1,6 +1,6 @@
 # How this RAG is implemented (`impl/`)
 
-Two HTTP endpoints do the real work. `POST /index-doc` is a stub and is not shown.
+Two HTTP endpoints do the real work. MCP tools `search` and `index_all` call the same routers (`mcp_server.py`, mounted at `/mcp`). `POST /index-doc` is a stub and is not shown.
 
 Default models (env / `generation_config.json` can override):
 
@@ -9,144 +9,201 @@ Default models (env / `generation_config.json` can override):
 | Chunk | `rag_core/indexing/chunking.py` — LlamaIndex `TokenTextSplitter` | No LLM. Size = embedder `max_seq_length` |
 | Embed | `rag_core/common/embeddings.py` — HF Inference | `sentence-transformers/all-MiniLM-L6-v2` |
 | Store / search | `pymilvus` → Zilliz collection `rag_chunks` | AUTOINDEX, COSINE |
-| Rerank | `rag_core/retrieval/rerank.py` — HF Inference | `cross-encoder/ms-marco-MiniLM-L-6-v2` |
+| Rerank | `rag_core/retrieval/rerank.py` — local CrossEncoder | `cross-encoder/ms-marco-MiniLM-L-6-v2` |
 | Generate | `rag_core/retrieval/generation.py` — Groq | `openai/gpt-oss-20b` |
 
 ---
 
 ## 1. Index — `POST /index-all`
 
-Destructive: drops `rag_chunks` if it exists, then rebuilds from the GitHub source repo.
+Destructive: drops `rag_chunks` if it exists, then rebuilds from GitHub `harshkumar1/website-scrapper` (`data/markdown/*.md` + `data/raw_data.csv`).
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor Client
-    participant API as FastAPI<br/>server.py
-    participant Router as rag_api/routers/index_all.py
-    participant Indexer as rag_core/indexing/indexer.py
-    participant HF as Hugging Face Inference
-    participant GitHub as Source GitHub repo
-    participant Zilliz as Zilliz / Milvus<br/>rag_chunks
+    participant API as index-all API
+    participant GitHub as GitHub repo website-scrapper
+    participant Chunk as chunking.py
+    participant HF as Hugging Face MiniLM
+    participant Zilliz as Zilliz rag_chunks
 
     Client->>API: POST /index-all
-    API->>Router: index_all()
-    Router->>Indexer: run_index_all()
-
-    Note over Indexer,HF: Probe embedding dim (one dummy embed)
-    Indexer->>HF: embed_text("dimension probe")
-    HF-->>Indexer: vector (dim used for schema)
-
-    Indexer->>HF: GET sentence_bert_config.json
-    HF-->>Indexer: max_seq_length → chunk_size, overlap = max(32, size/8)
-
-    Indexer->>Zilliz: drop collection if present
-    Indexer->>Zilliz: create_collection(schema + FLOAT_VECTOR dim)
-
-    Indexer->>GitHub: metadata CSV + list *.md + download bodies
-    GitHub-->>Indexer: SourceDocument list (doc_id, text, meta)
-
-    loop each document
-        Indexer->>Indexer: TokenTextSplitter → chunks
-        Indexer->>Indexer: build_records (chunk_id UUID, metadata, text)
+    API->>Chunk: start ingest
+    Chunk->>GitHub: fetch data/raw_data.csv once
+    GitHub-->>Chunk: scraping metadata (url, scheme, language, ...)
+    loop each markdown file
+        Chunk->>GitHub: fetch one data/markdown/*.md
+        GitHub-->>Chunk: page text
+        Chunk->>Chunk: chunk this document (token windows of 256, overlap 32)
     end
 
-    loop texts in batches of 32
-        Indexer->>HF: feature-extraction (chunk texts)
-        HF-->>Indexer: text_vector per chunk
+    Chunk-->>API: all chunk strings + scraping metadata (url, scheme, language, ...)
+
+    Note over Client,Zilliz: 
+
+    loop batches of 32 chunks
+        API->>HF: embed this batch (sentence-transformers/all-MiniLM-L6-v2, inputs=chunk texts)
+        HF-->>API: vectors for this batch
     end
 
-    loop records in batches of 500
-        Indexer->>Zilliz: insert(data)
-    end
+    Note over Client,Zilliz: 
 
-    Indexer->>Zilliz: create_index(text_vector, AUTOINDEX, COSINE)
-    Indexer->>Zilliz: load_collection()
-    Indexer-->>Client: documents_ingested, chunks_inserted, chunk_size, overlap
+    loop batches of 500 embeddings
+        API->>Zilliz: insert this batch (chunk text + scraping metadata + vector)
+    end
+    API-->>Client: Response JSON
 ```
+
+**What this implements**
+
+- **index-all calls chunking; chunking’s inputs are on GitHub.** Repo files: `data/markdown/*.md` (page text) and `data/raw_data.csv` (metadata, joined on `doc_id`). There is no ingest JSON file in that repo. The contents API response that lists the `.md` files is JSON. `generation_config.json` is local, not from this repo.
+- **In code today** `index_all` fetches those files (`source_repo.py`) then calls `chunk_text` / `build_records`. The chart shows fetch next to chunking so the talk track is: API → chunking → GitHub.
+- **How chunking works today (Q8).** Token windows, not sentences and not an LLM.
+  - Size = **256 tokens** (`max_seq_length` from MiniLM `sentence_bert_config.json`) so a chunk fits the embedder.
+  - Overlap = `max(32, chunk_size / 8)` → 32 tokens shared with the next chunk.
+  - LlamaIndex `TokenTextSplitter` cuts on tokens (tiktoken). You do not implement the tokenizer.
+  - Each chunk becomes a row: new `chunk_id`, `document_id`, `chunk_order`, CSV metadata (`canonical_url`, scheme, lang, …), and `text`.
+- Embed is a Hugging Face MiniLM call. You send text; they return 384-d vectors. HTTP is batched (32 texts). You do not implement the model.
+- Insert is `pymilvus` `insert` in slices of 500. Then AUTOINDEX / COSINE and `load_collection`.
 
 ---
 
 ## 2. Query — `POST /search`
 
-Live path: embed the question → recall a wider candidate set from Zilliz → cross-encoder rerank to `top_k` → optional Groq answer grounded in those chunks.
-
-Request: `{ "query", "top_k": 5, "generate_answer": true }`.
+Happy path: embed the question → search Zilliz → rerank → Groq answer from those chunks.
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor Client
-    participant API as FastAPI<br/>server.py
-    participant SearchAPI as rag_api/routers/search.py
-    participant Retrieve as rag_core/retrieval/search.py<br/>retrieve_chunks()
-    participant Embed as embeddings.py
-    participant HF as Hugging Face Inference
-    participant Zilliz as Zilliz / Milvus
-    participant Rerank as rag_core/retrieval/rerank.py
-    participant Gen as rag_core/retrieval/generation.py
-    participant Groq as Groq Chat Completions
+    participant API as FastAPI
+    participant Search as search.py
+    participant HF as Hugging Face
+    participant Zilliz as Zilliz
+    participant Rerank as rerank.py
+    participant Groq as Groq
 
-    Client->>API: POST /search {query, top_k, generate_answer}
-    API->>SearchAPI: search(request)
-    SearchAPI->>Retrieve: retrieve_chunks(query, top_k)
-
-    Retrieve->>Embed: embed_text(query)
-    Embed->>HF: feature-extraction (same MiniLM as index)
-    HF-->>Retrieve: query vector
-
-    Note over Retrieve: candidate_k = max(RERANK_CANDIDATES, top_k)<br/>default 8 when RERANK=true
-
-    Retrieve->>Zilliz: search(vector, limit=candidate_k, filter is_active==true)
-    alt collection not loaded (Zilliz auto-release)
-        Retrieve->>Zilliz: load_collection()
-        Retrieve->>Zilliz: search(...) again
-    end
-    Zilliz-->>Retrieve: hits (score = cosine distance + entity fields)
-
-    alt RERANK=false or no hits
-        Retrieve-->>SearchAPI: first top_k in vector order
-    else rerank
-        Retrieve->>Rerank: rerank_chunks(query, hits, top_n=top_k)
-        Rerank->>HF: cross-encoder pairs [query, chunk.text]
-        HF-->>Rerank: scores
-        Note over Rerank: keep vector_score, set score = rerank_score,<br/>sort desc, slice top_k
-        alt HF rerank fails
-            Rerank-->>Retrieve: exception
-            Retrieve-->>SearchAPI: first top_k in original vector order
-        else ok
-            Rerank-->>Retrieve: reranked chunks
-            Retrieve-->>SearchAPI: results
-        end
-    end
-
-    alt generate_answer = false
-        SearchAPI-->>Client: {query, top_k, results, answer: null}
-    else generate_answer = true
-        SearchAPI->>Gen: generate_answer(query, chunks)
-        Gen->>Gen: load generation_config.json
-        Gen->>Gen: user prompt = Context [1..n] (canonical_url + text) + Question
-        alt no chunks
-            Gen-->>SearchAPI: "No relevant context found..."
-        else Groq
-            Gen->>Groq: chat.completions (system + user, model/temp/max_tokens)
-            Groq-->>Gen: completion (strip optional &lt;think&gt; blocks)
-            alt timeout / error / empty
-                Gen-->>SearchAPI: fallback: first 3 chunk excerpts
-            else ok
-                Gen-->>SearchAPI: answer + generation metadata
-            end
-        end
-        SearchAPI-->>Client: {query, top_k, results, answer, generation}
-    end
+    Client->>API: POST /search {query, top_k}
+    API->>Search: run_search()
+    Search->>HF: embed query
+    HF-->>Search: query vector
+    Search->>Zilliz: similarity search
+    Zilliz-->>Search: candidate chunks
+    Search->>Rerank: rerank query + chunk text
+    Rerank-->>Search: top_k chunks
+    Search->>Groq: generate answer
+    Groq-->>Search: answer
+    Search-->>API: results + answer + generation
+    API-->>Client: JSON
 ```
+
+**What this implements**
+
+- Query embed uses the same MiniLM HTTP call as index (not a second model).
+- Zilliz fetch width is `max(RERANK_CANDIDATES, top_k)` (defaults 8 and 5) so rerank has extra candidates when `top_k` is small. Filter: `is_active == true`.
+- Rerank is a local `CrossEncoder` on `(query, chunk.text)` pairs. It sets `score` to the rerank score and keeps the first `top_k`.
+- Groq gets `generation_config.json` system prompt plus a user prompt of `$context` (reranked chunks + URLs) and `$query`. Response includes `results`, `answer`, and `generation` (prompts + model knobs).
+
+`top_k`: 5. Chunks after rerank (also sent to the LLM).
+
+`RERANK_CANDIDATES`: 8. Vector-search width before rerank.
+
+`temperature`: 0.2. `max_tokens`: 1024.
 
 ---
 
-## Talking points (matches the code)
+## 3. MCP — `POST /mcp`
 
-1. **Index time vs query time.** Chunking happens only on ingest. A question is never split; it is embedded once and used as a vector query.
-2. **Same embedding space.** Index chunks and the query both go through `embed_texts` / `embed_text` against the same HF model.
-3. **Recall then precision.** Milvus returns ~8 neighbors (bi-encoder). The cross-encoder scores `(query, chunk)` pairs and keeps the API `top_k` (default 5).
-4. **Grounded generation.** Groq only sees retrieved chunk text plus URLs from `generation_config.json`. Failures fall back to raw excerpts, not an ungrounded LLM guess.
-5. **What is not implemented.** `POST /index-doc` returns `not_implemented`. There is no eval endpoint in this stack.
+Same happy path as the REST tools. MCP does not retrieve on its own.
+
+Hosted URL: `https://harshkumar1-startup-funding-rag.hf.space/mcp`
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Claude
+    participant MCP as mcp_server.py
+    participant Search as search.py
+    participant Index as index_all.py
+
+    Claude->>MCP: search {query, top_k}
+    MCP->>Search: run_search()
+    Search-->>MCP: same JSON as POST /search
+    MCP-->>Claude: tool result
+
+    Claude->>MCP: index_all
+    MCP->>Index: index_all()
+    Index-->>MCP: same JSON as POST /index-all
+    MCP-->>Claude: tool result
+```
+
+**What this implements**
+
+- One process: FastAPI mounts FastMCP at `/mcp`. Tools call `run_search` / `index_all` (diagrams 2 and 1).
+- MCP `search` always sets `generate_answer=true` and `rerank=true`.
+- `POST /index-doc` is a stub and is not an MCP tool.
+
+**How this is implemented (MCP)**
+
+Walk the numbered arrows:
+
+1. **One process.** `server.py` builds FastAPI with `lifespan=mcp_http_app.lifespan` and mounts FastMCP at `/mcp`. REST and MCP share port 8080. `redirect_slashes=False` plus middleware that maps `/mcp` → `/mcp/` so proxies do not 307 to `http://` (that broke Claude).
+2. **FastMCP, not a custom protocol.** `mcp_server.py`: `FastMCP("startup-funding-rag")`, `http_app(path="/", stateless_http=True, host_origin_protection=False)` so the mount is `/mcp` not `/mcp/mcp`, and Claude can call from another origin.
+3. **Tools are wrappers.** `@mcp.tool search` calls `run_search` (same `SearchResponse` as `POST /search`) with `generate_answer=true` and `rerank=true` always. `@mcp.tool index_all` calls `index_all_http`; `HTTPException` becomes `{status, detail}` instead of a thrown HTTP error.
+4. **No second RAG.** Retrieval, Zilliz, HF, Groq all stay in `rag_core`. MCP never embeds or searches itself.
+5. **What is not wired.** `POST /index-doc` exists as a stub router; it is not an MCP tool.
+6. **How Claude reaches it.** Remote MCP URL is the Space `https://…hf.space/mcp` (streamable HTTP). A question should produce a `search` tool call, which then follows diagram 2.
+
+---
+
+## 4. Deployment (high level)
+
+GitHub holds the source. Actions build `impl/Dockerfile`, push GHCR as `:shortSha` and `:latest`, then pin the Hugging Face Space Dockerfile to that SHA and factory-reboot. The Space does not copy `impl/`; it only `FROM`s GHCR. Runtime secrets are Space env vars. Claude talks to `/mcp` on the Space.
+
+The Space process is not the vector DB or the models. Those stay outside the container:
+
+```mermaid
+flowchart LR
+    Dev[git push main]
+    Scan[SecurityScan]
+    Pub[DockerPublish]
+    GHCR["ghcr.io image :shortSha"]
+    Space[HF_Space]
+    Claude[Claude]
+    Zilliz[Zilliz]
+    Infer[HF_Inference]
+    Groq[Groq]
+
+    Dev --> Scan
+    Scan --> Pub
+    Pub --> GHCR
+    Pub --> Space
+    Space --> GHCR
+    Claude -->|"HTTPS /mcp and /search"| Space
+    Space --> Infer
+    Space --> Zilliz
+    Space --> Groq
+```
+
+**How this is implemented (deploy)**
+
+Walk the boxes left to right:
+
+1. **Source.** App code lives in GitHub `impl/` (`Dockerfile`, `server.py`, `rag_core`, `mcp_server.py`). Push to `main` starts `.github/workflows/docker-publish.yml`.
+2. **Scan then publish.** Trivy on the image, then push `ghcr.io/harshkumar1/startup-funding-rag:<shortSha>` and `:latest`. GHCR is the runnable artifact; the Space does not clone `impl/`.
+3. **Pin the Space.** After publish, `.github/scripts/point_hf_space.py` (secret `HF_TOKEN`) writes the Space Dockerfile as `FROM ghcr.io/…:<shortSha>`, drops extra Space files, factory-reboot. **Pub → Space** is that Hub API update; **Space → GHCR** is HF pulling that tag at build.
+4. **What runs in the Space.** Uvicorn on 8080, uid 1000. `config.py` reads **env first** (Space Secrets: `ZILLIZ_*`, `HF_TOKEN`, `GROQ_API_KEY`, source-repo token), then `creds.config`.
+5. **What does not run in the Space.** Vectors stay in Zilliz `rag_chunks`. Embeddings are HF Inference HTTP. Rerank is the sample MiniLM cross-encoder inside the container. Answers are Groq.
+6. **Claude / REST.** Clients hit the Space: `/mcp` and `/search`. They never talk to GHCR. Same image locally is `docker/podman` on 8080 before you promote.
+
+---
+
+## Cross-cutting (if you need one slide)
+
+1. **Index time vs query time.** Chunking only in `indexer.py`. A question is one `embed_text` in `retrieve_chunks`.
+2. **Same embedding space.** Ingest `embed_texts` and query `embed_text` both hit MiniLM on HF Inference.
+3. **Recall then precision.** Milvus ~8 (`RERANK_CANDIDATES`) then cross-encoder down to `top_k`.
+4. **Grounded generation.** Groq prompt is only retrieved chunks + URLs from `generation_config.json`; failures → excerpts.
+5. **Not implemented.** `POST /index-doc` is `not_implemented`. No eval API. MCP does not wrap `/index-doc`.
+

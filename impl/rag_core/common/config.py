@@ -58,6 +58,15 @@ def _read_creds_file(path: Path) -> dict[str, str]:
 
 
 def _apply_creds_file() -> None:
+    """Fill empty env vars from creds.config. Do not override env that is already set.
+
+    Resolution order (highest first):
+      1. Environment variables — Hugging Face Space Secrets are injected here
+         at runtime, same as `docker -e` / Cloud Run. There is no separate
+         Space-secret API inside the process.
+      2. creds.config (CREDS_CONFIG_PATH or a parent-dir search) — local
+         laptop / bind-mount. Used only for keys still unset after (1).
+    """
     path = _find_creds_file()
     if path is None:
         return
