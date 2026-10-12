@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
@@ -56,9 +57,18 @@ class SearchResponse(BaseModel):
             "or null if generate_answer was false."
         ),
     )
+    latency: int = Field(
+        ...,
+        description=(
+            "Wall-clock milliseconds from the start of search through "
+            "retrieval, rerank, and (when enabled) Groq generation. "
+            "Same idea as sample QueryResponse.latency."
+        ),
+    )
 
 
 def run_search(request: SearchRequest, *, rerank: bool | None = None) -> SearchResponse:
+    t0 = time.time()
     chunks = retrieve_chunks(request.query, top_k=request.top_k, rerank=rerank)
 
     answer = None
@@ -81,6 +91,7 @@ def run_search(request: SearchRequest, *, rerank: bool | None = None) -> SearchR
         results=chunks,
         answer=answer,
         generation=generation_info,
+        latency=int((time.time() - t0) * 1000),
     )
 
     logger.info("Search response:\n%s", response.model_dump_json(indent=2))
